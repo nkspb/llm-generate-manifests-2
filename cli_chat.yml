@@ -1,0 +1,34 @@
+import requests 
+
+API_URL = "http://127.0.0.1:5000"
+
+def start_session():
+    query = input("Добрый день! Уточните, для каких целей вы хотите получить манифесты?\nНапример, 'манифест для интеграции istio с postgres':\n> ")
+    response = requests.post(f"{API_URL}/get_manifests", json={"query": query})
+    
+    print("response: ", response)
+    if response.status_code != 200:
+        print(f"Произошла ошибка при получении манифеста: {response.text}")
+        return None, None
+
+    print("\n" + response.text)
+
+    # Extract session ID from response
+    for line in response.text.splitlines():
+        if "session_id" in line:
+            session_id = line.split("`")[1]
+            return session_id, response.text
+    print(f"Не удалось найти сессию в ответе.")
+    return None, None
+
+def chat_loop(session_id):
+    while True:
+        user_input = input("> ")
+        response = requests.post(f"{API_URL}/reply", json={"session_id": session_id, "message": user_input})
+        print(f"\n{response.text}")
+
+if __name__ == "__main__":
+    session_id, _ = start_session()
+    if session_id:
+        chat_loop(session_id)
+
