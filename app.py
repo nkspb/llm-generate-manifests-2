@@ -47,6 +47,10 @@ class ReplyRequest(BaseModel):
     session_id: str
     message: str # user's message
 
+# Decide what the user wants to do and reroute accordingly
+def llm_classify_intent(llm, text: str) -> str:
+    pass
+
 # Build vector store
 # hhsw - Hierarchical Navigable Small World (HNSW) algorithm
 # space - how distances between vectors are calculated
@@ -166,7 +170,7 @@ async def get_manifests(request: QueryRequest, fastapi_request: Request):
     logger.info(f"New session created: {session_id}")
 
     return PlainTextResponse(
-        content="session_id " + session_id + "\n" + ai_message + "\n",
+        content=f"session_id `{session_id}`\n{ai_message}\n",
         headers={
             "App-Session-ID": session_id,
             "App-Source-File": doc_source
