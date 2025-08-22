@@ -3,11 +3,14 @@ from langchain_chroma import Chroma
 from documents import load_documents
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+from typing import Optional, Literal
 
 from pydantic import BaseModel # For validating user's POST request body
 from placeholder_utils import extract_placeholders, PLACEHOLDER_TYPES, is_placeholder_valid, fill_placeholders
 
-import logging, os, uuid
+import logging, os, uuid, json
+
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 llm = GigaChat(model="GigaChat-2-Max",
                 base_url="https://X/v1",
@@ -23,7 +26,7 @@ embeddings = GigaChatEmbeddings(model="EmbeddingsGigaR",
 
 # General logging settings
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
@@ -47,9 +50,22 @@ class ReplyRequest(BaseModel):
     session_id: str
     message: str # user's message
 
-# Decide what the user wants to do and reroute accordingly
-def llm_classify_intent(llm, text: str) -> str:
-    pass
+class ClassifyRequest(BaseModel):
+    query: str
+
+class ClassifyResponse(BaseModel):
+    intent: str
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None # Optional session ID
+
+class ChatResponse(BaseModel):
+    intent: Literal["GET_MANIFESTS", "HELP", "CHAT"] 
+    action: Literal["CALL_GET_MANIFESTS", "ASK_SCENARIO", "NONE"] # For API calls actions
+    suggested_payload: Optional[dict] = None # Suggest what parameters to use next
+    reply: str # Human-readable reply to the user
+    session_id: Optional[str] = None # Session ID for continuing the conversation
 
 # Build vector store
 # hhsw - Hierarchical Navigable Small World (HNSW) algorithm
@@ -78,6 +94,67 @@ if not os.path.exists(VECTOR_DIR):
 
 vector_store = load_vector_store()
 
+def llm_classify_intent(llm, text: str) -> str:
+    """Определение цели запроса пользователя"""
+    prompt = f""" Ты - классификатор запросов пользователя. Выбери намерение пользователя
+    на основании его запроса:
+    - GET_MANIFESTS: запросил манифесты, yaml, интеграцию, сценарий и т.п.
+    - HELP: спрашивает, что ты умеешь, как работать с ботом, просит инструкцию
+    - CHAT: любой другой запрос, который не требует манифестов
+
+    Верни только одно слово: GET_MANIFESTS, HELP или CHAT
+
+    Пользователь: {text}
+    """
+
+    try:
+        response = llm.invoke(prompt)
+        label = (getattr(response, "content", "") or "").strip().upper()
+        logger.info(f"llm_classify_intent label: {label}")
+        if label in ["GET_MANIFESTS", "HELP", "CHAT"]:
+            return label
+    except Exception as e:
+        logger.error(f"Произошла ошибка при классификации запроса пользователя: {e}")
+        return "CHAT"
+
+def llm_assess_specificity(llm, user_text: str) -> dict:
+    """
+    Запрос к LLM для оценки, насколько запрос пользователя позволяет понять, какие манифесты генерировать
+    """
+    prompt = f""" Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
+    Определи, достаточно ли специфичен запрос пользователя, чтобы искать нужные манифесты (True/False).
+    Если нет - предложи 2-4 коротких уточняющих вопроса.
+    Если да - перефразируй запрос кратко и предметно.
+
+    Верни строго JSON вида:
+    {{
+        "is_specific": true|false,
+        "rephrased_query": "строка (может быть пустой)",
+        "followups": ["вопрос1", "вопрос2", ...]
+    }}
+
+    Запрос: {user_text}
+    """
+
+    try:
+        response = llm.invoke(prompt)
+        raw = (getattr(response, "content", "") or "").strip()
+        data = json.loads(raw)
+
+        if not isinstance(data.get("followups", []), list):
+            data["followups"] = []
+        data["rephrased_query"] = data.get("rephrased_query") or ""
+        data["is_specific"] = bool(data.get("is_specific", False))
+        return data
+    except Exception as e:
+        return {
+            "is_specific": False,
+            "rephrased_query": "",
+            "followups": [
+                "С каким сервисом вы хотите интегрировать istio service mesh?",
+            ]
+        }
+
 app = FastAPI()
 
 # Async, so fastapi server can handle other things while waiting for response
@@ -86,6 +163,200 @@ app = FastAPI()
 async def health_check():
     logger.info("Health check hit")
     return {"status": "ok"}
+
+# curl -X POST http://localhost:5000/classify -H "Content-Type: application/json" -d '{"query": "Что ты умеешь?"}'
+@app.post("/classify", response_model=ClassifyResponse)
+async def classify(request: ClassifyRequest):
+    label = llm_classify_intent(llm, request.query)
+    print(label)
+    return ClassifyResponse(intent=label)
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    # For continuing ASK_SCENARIO session
+    if request.session_id:
+        session = sessions.get(request.session_id)
+        if not session or session.get("mode") != "ASK_SCENARIO":
+            return ChatResponse(
+                intent="CHAT",
+                action="NONE",
+                suggested_payload=None,
+                reply="Сессия не найдена или завершена. Попробуйте начать сначала."
+            )
+
+        # Add user message to session message history
+        session["collected_messages"].append(request.message)
+        combined = " ".join(session["collected_messages"])
+
+        # Assess if the request is specific enough
+        assess = llm_assess_specificity(llm, combined)
+        if not assess["is_specific"]:
+            bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
+            return ChatResponse(
+                intent="GET_MANIFESTS",
+                action="ASK_SCENARIO",
+                suggested_payload=None,
+                reply=("Спасибо. Нужны еще детали:\n{bullet_questions}"),
+                session_id=request.session_id
+            )
+
+        # If request is specific enough, finish ASK_SCENARIO and tell user to call GET_MANIFESTS
+        query = assess["rephrased_query"] or combined
+        # del sessions[request.session_id] # Ending clarification session
+
+        # return ChatResponse(
+        #     intent="GET_MANIFESTS",
+        #     action="CALL_GET_MANIFESTS",
+        #     suggested_payload={"query": query},
+        #     reply=("Генерирую манифесты для вашего сценария..."),
+        #     session_id=None
+        # )
+        return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
+    
+    # Classify user message
+    label = llm_classify_intent(llm,request.message)
+
+    if label == "GET_MANIFESTS":
+        assess = llm_assess_specificity(llm, request.message)
+        print(f"assess = {assess}")
+        if not assess["is_specific"]:
+            bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
+            session_id = str(uuid.uuid4())
+            print(f"GET_MANIFESTS: session_id = {session_id}")
+            sessions[session_id] = {
+                "mode": "ASK_SCENARIO",
+                "collected_messages": [request.message]
+            }
+            return ChatResponse(
+                intent="GET_MANIFESTS",
+                action="ASK_SCENARIO",
+                suggested_payload=None,
+                reply=(
+                    "Уточните, пожалуйста, какую интеграцию вы хотите настроить:\n"
+                    f"{bullet_questions}"
+                ),
+                session_id=session_id
+            )
+    
+        query = assess["rephrased_query"] or request.message
+        # return ChatResponse(
+        #     intent="GET_MANIFESTS",
+        #     action="CALL_GET_MANIFESTS",
+        #     suggested_payload={"query": query},
+        #     reply="Сейчас найду манифесты по вашему описанию...",
+        # )
+        return _start_manifest_flow_from_query(query)
+    
+    if label == "HELP":
+        return ChatResponse(
+            intent=label,
+            action="NONE",
+            suggested_payload=None,
+            reply=(
+                "Я помогаю сгенерировать YAML-манифесты для интеграции istio service mesh с другими сервисами"
+            ),
+        )
+    
+    try:
+        response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
+        text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
+    except Exception:
+        text = "Привет! Опишите, какой сценарий вас интересует."
+    return ChatResponse(
+        intent="CHAT",
+        action="NONE",
+        suggested_payload=None,
+        reply=text,
+    )
+
+def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] = None) -> "ChatResponse":
+    """
+        Same logics as in get_manifests, 
+        but returns ChatResponse so that /chat could perform the flow
+    """
+    try:
+        results = vector_store.similarity_search_with_score(query, k=1)
+    except Exception as e:
+        logger.error(f"Произошла ошибка при поиске по векторной базе: {e}")
+        return ChatResponse(
+            intent="GET_MANIFESTS",
+            action="NONE",
+            suggested_payload=None,
+            reply="Произошла ошибка при поиске манифестов. Попробуйте другой запрос.",
+            session_id=reuse_session_id
+        )
+
+    if not results:
+        return ChatResponse(
+            intent="GET_MANIFESTS",
+            action="NONE",
+            suggested_payload=None,
+            reply=("К сожалению, не удалось найти подходящий манифест. Попробуйте другой запрос.\n"),
+            session_id=reuse_session_id
+        )
+
+    matched_doc, raw_score = results[0]
+    logger.debug("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
+
+    doc_text = matched_doc.page_content
+    doc_source = matched_doc.metadata.get("source", "source unknown")
+
+    similarity = 1 - raw_score
+    SIMILARITY_THRESHOLD = 0.4
+    if similarity < SIMILARITY_THRESHOLD:
+        return ChatResponse(
+            intent="GET_MANIFESTS",
+            action="NONE",
+            suggested_payload=None,
+            reply=("К сожалению, не удалось найти подходящий манифест. Попробуйте другой запрос.\n"),
+            session_id=reuse_session_id
+        )
+    placeholders = extract_placeholders(doc_text)
+
+    session_id = reuse_session_id or str(uuid.uuid4())
+    if not placeholders:
+        sessions[session_id] = {
+            "original_doc_text": doc_text,
+            "remaining_placeholders": [],
+            "filled_values": {},
+            "current_placeholder": None,
+            "source_file": doc_source
+        }
+        return ChatResponse(
+            intent="GET_MANIFESTS",
+            action="NONE",
+            suggested_payload=None,
+            reply=("Манифест найден. Необходимо заполнить все поля. Отправьте render, чтобы показать их\n"),
+            session_id=session_id
+        )
+
+        first_placeholder = placeholders[0]
+        prompt = (
+        f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
+        Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты.
+        Помоги пользователю заполнить YAML-файл манифеста, в котором есть плейсхолдер `{{{{ ${first_placeholder} }}}}`.
+        Объясни его назначение и задай вопрос, чтобы получить значение.
+        """
+        )
+        llm_response = llm.invoke(prompt)
+        ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
+
+        sessions[session_id] = {
+            "original_doc_text": doc_text,
+            "remaining_placeholders": placeholders[1:],
+            "filled_values": {},
+            "first_placeholder": first_placeholder,
+            "source_file": doc_source
+        }
+        logger.info("[CHAT manifests] New session created: %s", session_id)
+
+        return ChatResponse(
+            intent="GET_MANIFESTS",
+            action="NONE",
+            suggested_payload=None,
+            reply=ai_message,
+            session_id=session_id
+        )
 
 # If parameter is a Pydantic model, FastAPI reads it from request body
 # curl -X POST http://localhost:5000/get_manifests -H "Content-Type: application/json" -d '{"query": "Верни только темплейты для интеграции с postgress"}'
