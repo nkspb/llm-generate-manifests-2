@@ -147,7 +147,6 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
         data["is_specific"] = bool(data.get("is_specific", False))
         logger.info(f"data['is_specific']: {data['is_specific']}")
         logger.info(f"data['rephrased_query']: {data['rephrased_query']}")
-        print(f"combined: {combined}")
         return data
     except Exception as e:
         return {
@@ -204,6 +203,7 @@ async def chat(request: ChatRequest):
                     session_id=request.session_id
                 )
             query = assess["rephrased_query"] or combined
+            session["mode"] = "MANIFEST"
             return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
 
         if mode == "MANIFEST":
