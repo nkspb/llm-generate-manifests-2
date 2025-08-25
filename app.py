@@ -174,47 +174,53 @@ async def classify(request: ClassifyRequest):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # For continuing ASK_SCENARIO session
     if request.session_id:
         session = sessions.get(request.session_id)
-        if not session or session.get("mode") != "ASK_SCENARIO":
+        if not session:
             return ChatResponse(
                 intent="CHAT",
                 action="NONE",
                 suggested_payload=None,
-                reply="Сессия не найдена или завершена. Попробуйте начать сначала."
+                reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
             )
 
-        # Add user message to session message history
-        session["collected_messages"].append(request.message)
-        combined = " ".join(session["collected_messages"])
+        mode = session.get("mode")
 
-        # Assess if the request is specific enough
-        assess = llm_assess_specificity(llm, combined)
-        if not assess["is_specific"]:
-            bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
+        if mode == "ASK_SCENARIO":
+            session["collected_messages"].append(request.message)
+            combined = " ".join(session["collected_messages"])
+            assess = llm_assess_specificity(llm, combined)
+            if not assess["is_specific"]:
+                bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
+                return ChatResponse(
+                    intent="GET_MANIFESTS",
+                    action="ASK_SCENARIO",
+                    suggested_payload=None,
+                    reply=("Спасибо. Нужны еще детали: " + bullet_questions),
+                    session_id=request.session_id
+                )
+            query = assess["rephrased_query"] or combined
+            return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
+
+            if mode == "MANIFEST":
+                text, done = _handle_placeholder_reply(request.session_id, request.message)
+                if done:
+                    sessions.pop(request.session_id, None)
+                return ChatResponse(
+                    intent="GET_MANIFESTS",
+                    action="NONE",
+                    suggested_payload=None,
+                    reply=text,
+                    session_id=None if done else request.session_id
+                )
+
             return ChatResponse(
-                intent="GET_MANIFESTS",
-                action="ASK_SCENARIO",
+                intent="CHAT",
+                action="NONE",
                 suggested_payload=None,
-                reply=("Спасибо. Нужны еще детали: " + bullet_questions),
-                session_id=request.session_id
+                reply="Сессия в неизвестном состоянии. Начните, пожалуйста, сначала."
             )
 
-        # If request is specific enough, finish ASK_SCENARIO and tell user to call GET_MANIFESTS
-        query = assess["rephrased_query"] or combined
-        # del sessions[request.session_id] # Ending clarification session
-
-        # return ChatResponse(
-        #     intent="GET_MANIFESTS",
-        #     action="CALL_GET_MANIFESTS",
-        #     suggested_payload={"query": query},
-        #     reply=("Генерирую манифесты для вашего сценария..."),
-        #     session_id=None
-        # )
-        return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
-    
-    # Classify user message
     label = llm_classify_intent(llm,request.message)
 
     if label == "GET_MANIFESTS":
@@ -238,16 +244,10 @@ async def chat(request: ChatRequest):
                 ),
                 session_id=session_id
             )
-    
-        query = assess["rephrased_query"] or request.message
-        # return ChatResponse(
-        #     intent="GET_MANIFESTS",
-        #     action="CALL_GET_MANIFESTS",
-        #     suggested_payload={"query": query},
-        #     reply="Сейчас найду манифесты по вашему описанию...",
-        # )
+
+        query = assess["rephrased_query"] or combined
         return _start_manifest_flow_from_query(query)
-    
+
     if label == "HELP":
         return ChatResponse(
             intent=label,
@@ -257,7 +257,7 @@ async def chat(request: ChatRequest):
                 "Я помогаю сгенерировать YAML-манифесты для интеграции istio service mesh с другими сервисами"
             ),
         )
-    
+        
     try:
         response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
         text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
@@ -361,8 +361,46 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
         session_id=session_id
     )
 
-def _handle_reply(session_id: str, user_input: str) -> tuple[str, bool]:
-    pass
+def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bool]:
+    """Shared logic for filling placeholders.
+    Returns (reply_text, done).
+    If done=True, session is complete and manifests are rendered"""
+
+    # Search for current active session
+    session = sessions.get(session_id)
+    if not session:
+        return ("Сессия не найдена. Начните новую сессию.", True)
+
+    user_input = user_input.strip()
+    current_placeholder = session.get("current_placeholder")
+
+    # If there are no more placeholders, make substitutions and render manifests
+    if current_placeholder is None and not session["remaining_placeholders"]:
+        rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
+        return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
+
+    expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
+    if not is_placeholder_valid(user_input, expected_type):
+        return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}. Попробуйте снова:", False)
+
+    # Save the value of current placeholder
+    session["filled_values"][current_placeholder] = user_input
+
+    if session["remaining_placeholders"]:
+        next_placeholder = session["remaining_placeholders"].pop(0)
+        session["current_placeholder"] = next_placeholder
+
+        try:
+            prompt = f"Объясни значение плейсхолдера `{{{{ ${next_placeholder} }}}}` и попроси пользователя ввести значение."
+            response = llm.invoke(prompt)
+            text = (getattr(response, "content", "") or "").strip()
+        except Exception:
+            text = f"Введите значение для ${{{next_placeholder}}}:"
+        return (text, False)
+    
+    rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
+    return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
+
 
 
 # If parameter is a Pydantic model, FastAPI reads it from request body
@@ -457,61 +495,68 @@ async def get_manifests(request: QueryRequest, fastapi_request: Request):
     )
 
 # curl -X POST http://localhost:5000/reply -H "Content-Type: application/json" -d '{"message": "value", "session_id": "123"}
+# @app.post("/reply")
+# async def reply_to_llm(request: ReplyRequest):
+#     session_id = request.session_id
+#     user_input = request.message.strip()
+
+#     # Find the user session
+#     session = sessions.get(session_id)
+#     if not session:
+#         return PlainTextResponse(
+#             content="Сессия не найдена. Начните новую сессию.",
+#             status_code=404,
+#             media_type="text/plain"
+#         )
+    
+#     # Get current placeholder
+#     current_placeholder = session["current_placeholder"]
+#     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
+
+#     if not is_placeholder_valid(user_input, expected_type):
+#         return PlainTextResponse(
+#             content=f"`{{{{ ${current_placeholder }}}}}` ожидает значение с типом `{expected_type}`. Попробуйте снова: ",
+#             status_code=200,
+#             media_type="text/plain"
+#         )
+
+#     # If placeholder is valid, save its value to current session
+#     session["filled_values"][current_placeholder] = user_input
+
+#     # Check if there are remaining placeholders
+#     if session["remaining_placeholders"]:
+#         next_placeholder = session["remaining_placeholders"].pop(0)
+#         session["current_placeholder"] = next_placeholder
+
+#         # Ask user to fill in the next placeholder
+#         prompt = (
+#             f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
+#             Объясни значение плейсхолдера `{{{{ ${next_placeholder} }}}}` и попроси пользователя ввести значение."""
+#         )
+#         llm_response = llm.invoke(prompt)
+#         ai_message = llm_response.content.strip()
+
+#         return PlainTextResponse(content=ai_message + "\n")
+#     else:
+#         resulting_yaml = session["original_doc_text"]
+#         print(session["filled_values"])
+#         resulting_yaml = fill_placeholders(resulting_yaml, session["filled_values"])
+
+#         # After all manifests are filled in, delete the session
+#         # del sessions[session_id]
+
+#         return PlainTextResponse(
+#             content=f"Все значения заполнены! Итоговые манифесты:\n\n + {resulting_yaml}",
+#             status_code=200,
+#             media_type="text/plain"
+#         )
+
 @app.post("/reply")
 async def reply_to_llm(request: ReplyRequest):
-    session_id = request.session_id
-    user_input = request.message.strip()
-
-    # Find the user session
-    session = sessions.get(session_id)
-    if not session:
-        return PlainTextResponse(
-            content="Сессия не найдена. Начните новую сессию.",
-            status_code=404,
-            media_type="text/plain"
-        )
-    
-    # Get current placeholder
-    current_placeholder = session["current_placeholder"]
-    expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
-
-    if not is_placeholder_valid(user_input, expected_type):
-        return PlainTextResponse(
-            content=f"`{{{{ ${current_placeholder }}}}}` ожидает значение с типом `{expected_type}`. Попробуйте снова: ",
-            status_code=200,
-            media_type="text/plain"
-        )
-
-    # If placeholder is valid, save its value to current session
-    session["filled_values"][current_placeholder] = user_input
-
-    # Check if there are remaining placeholders
-    if session["remaining_placeholders"]:
-        next_placeholder = session["remaining_placeholders"].pop(0)
-        session["current_placeholder"] = next_placeholder
-
-        # Ask user to fill in the next placeholder
-        prompt = (
-            f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-            Объясни значение плейсхолдера `{{{{ ${next_placeholder} }}}}` и попроси пользователя ввести значение."""
-        )
-        llm_response = llm.invoke(prompt)
-        ai_message = llm_response.content.strip()
-
-        return PlainTextResponse(content=ai_message + "\n")
-    else:
-        resulting_yaml = session["original_doc_text"]
-        print(session["filled_values"])
-        resulting_yaml = fill_placeholders(resulting_yaml, session["filled_values"])
-
-        # After all manifests are filled in, delete the session
-        # del sessions[session_id]
-
-        return PlainTextResponse(
-            content=f"Все значения заполнены! Итоговые манифесты:\n\n + {resulting_yaml}",
-            status_code=200,
-            media_type="text/plain"
-        )
+    text, done = _handle_placeholder_reply(request.session_id, request.message)
+    if done:
+        sessions.pop(request.session_id, None)
+    return PlainTextResponse(content=text)
 
 if __name__ == "__main__":
     import uvicorn
