@@ -146,6 +146,8 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
         data["rephrased_query"] = data.get("rephrased_query") or ""
         data["is_specific"] = bool(data.get("is_specific", False))
         logger.info(f"data['is_specific']: {data['is_specific']}")
+        logger.info(f"data['rephrased_query']: {data['rephrased_query']}")
+        print(f"combined: {combined}")
         return data
     except Exception as e:
         return {
@@ -189,6 +191,8 @@ async def chat(request: ChatRequest):
         if mode == "ASK_SCENARIO":
             session["collected_messages"].append(request.message)
             combined = " ".join(session["collected_messages"])
+            print(f"combined: {combined}")
+
             assess = llm_assess_specificity(llm, combined)
             if not assess["is_specific"]:
                 bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
@@ -202,24 +206,24 @@ async def chat(request: ChatRequest):
             query = assess["rephrased_query"] or combined
             return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
 
-            if mode == "MANIFEST":
-                text, done = _handle_placeholder_reply(request.session_id, request.message)
-                if done:
-                    sessions.pop(request.session_id, None)
-                return ChatResponse(
-                    intent="GET_MANIFESTS",
-                    action="NONE",
-                    suggested_payload=None,
-                    reply=text,
-                    session_id=None if done else request.session_id
-                )
-
+        if mode == "MANIFEST":
+            text, done = _handle_placeholder_reply(request.session_id, request.message)
+            if done:
+                sessions.pop(request.session_id, None)
             return ChatResponse(
-                intent="CHAT",
+                intent="GET_MANIFESTS",
                 action="NONE",
                 suggested_payload=None,
-                reply="Сессия в неизвестном состоянии. Начните, пожалуйста, сначала."
+                reply=text,
+                session_id=None if done else request.session_id
             )
+
+        return ChatResponse(
+            intent="CHAT",
+            action="NONE",
+            suggested_payload=None,
+            reply="Сессия в неизвестном состоянии. Начните, пожалуйста, сначала."
+        )
 
     label = llm_classify_intent(llm,request.message)
 
@@ -257,7 +261,7 @@ async def chat(request: ChatRequest):
                 "Я помогаю сгенерировать YAML-манифесты для интеграции istio service mesh с другими сервисами"
             ),
         )
-        
+
     try:
         response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
         text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
@@ -377,7 +381,8 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
     # If there are no more placeholders, make substitutions and render manifests
     if current_placeholder is None and not session["remaining_placeholders"]:
         rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
-        return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
+        pretty = f"Все значения заполнены. Итоговые манифесты:\n\n```yaml\n{rendered}\n```"
+        return (pretty, True)
 
     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
     if not is_placeholder_valid(user_input, expected_type):
@@ -399,6 +404,7 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
         return (text, False)
     
     rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
+    pretty = f"Все значения заполнены. Итоговые манифесты:\n\n```yaml\n{rendered}\n```"
     return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
 
 
