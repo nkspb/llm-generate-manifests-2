@@ -145,6 +145,7 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
             data["followups"] = []
         data["rephrased_query"] = data.get("rephrased_query") or ""
         data["is_specific"] = bool(data.get("is_specific", False))
+        logger.info(f"data['is_specific']: {data['is_specific']}")
         return data
     except Exception as e:
         return {
@@ -196,7 +197,7 @@ async def chat(request: ChatRequest):
                 intent="GET_MANIFESTS",
                 action="ASK_SCENARIO",
                 suggested_payload=None,
-                reply=("Спасибо. Нужны еще детали:\n{bullet_questions}"),
+                reply=("Спасибо. Нужны еще детали: " + bullet_questions),
                 session_id=request.session_id
             )
 
@@ -316,6 +317,7 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
     session_id = reuse_session_id or str(uuid.uuid4())
     if not placeholders:
         sessions[session_id] = {
+            "mode": "MANIFEST",
             "original_doc_text": doc_text,
             "remaining_placeholders": [],
             "filled_values": {},
@@ -330,33 +332,38 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
             session_id=session_id
         )
 
-        first_placeholder = placeholders[0]
-        prompt = (
-        f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-        Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты.
-        Помоги пользователю заполнить YAML-файл манифеста, в котором есть плейсхолдер `{{{{ ${first_placeholder} }}}}`.
-        Объясни его назначение и задай вопрос, чтобы получить значение.
-        """
-        )
-        llm_response = llm.invoke(prompt)
-        ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
+    first_placeholder = placeholders[0]
+    prompt = (
+    f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
+    Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты.
+    Помоги пользователю заполнить YAML-файл манифеста, в котором есть плейсхолдер `{{{{ ${first_placeholder} }}}}`.
+    Объясни его назначение и задай вопрос, чтобы получить значение.
+    """
+    )
+    llm_response = llm.invoke(prompt)
+    ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
 
-        sessions[session_id] = {
-            "original_doc_text": doc_text,
-            "remaining_placeholders": placeholders[1:],
-            "filled_values": {},
-            "first_placeholder": first_placeholder,
-            "source_file": doc_source
-        }
-        logger.info("[CHAT manifests] New session created: %s", session_id)
+    sessions[session_id] = {
+        "mode": "MANIFEST",
+        "original_doc_text": doc_text,
+        "remaining_placeholders": placeholders[1:],
+        "filled_values": {},
+        "current_placeholder": first_placeholder,
+        "source_file": doc_source
+    }
+    logger.info("[CHAT manifests] New session created: %s", session_id)
 
-        return ChatResponse(
-            intent="GET_MANIFESTS",
-            action="NONE",
-            suggested_payload=None,
-            reply=ai_message,
-            session_id=session_id
-        )
+    return ChatResponse(
+        intent="GET_MANIFESTS",
+        action="NONE",
+        suggested_payload=None,
+        reply=ai_message,
+        session_id=session_id
+    )
+
+def _handle_reply(session_id: str, user_input: str) -> tuple[str, bool]:
+    pass
+
 
 # If parameter is a Pydantic model, FastAPI reads it from request body
 # curl -X POST http://localhost:5000/get_manifests -H "Content-Type: application/json" -d '{"query": "Верни только темплейты для интеграции с postgress"}'
@@ -498,7 +505,7 @@ async def reply_to_llm(request: ReplyRequest):
         resulting_yaml = fill_placeholders(resulting_yaml, session["filled_values"])
 
         # After all manifests are filled in, delete the session
-        del sessions[session_id]
+        # del sessions[session_id]
 
         return PlainTextResponse(
             content=f"Все значения заполнены! Итоговые манифесты:\n\n + {resulting_yaml}",
