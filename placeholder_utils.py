@@ -16,10 +16,12 @@ def is_placeholder_valid(value: str, expected_type: str) -> bool:
     return True
 
 def fill_placeholders(yaml_text: str, values: dict[str, str]) -> str:
+    print("[DEBUG] Starting fill_placeholders")
+    print("[DEBUG] values = ", values)
+
     for key, value in values.items():
-        pattern = PLACEHOLDER_PATTERN
-        yaml_text = re.sub(pattern, value, yaml_text)
-    
+        pattern = re.compile(r"\{\{\s*\$" + re.escape(key) + r"\s*\}\}")
+        yaml_text = pattern.sub(value, yaml_text)
     return yaml_text
     
 PLACEHOLDER_TYPES = {
