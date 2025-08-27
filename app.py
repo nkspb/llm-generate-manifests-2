@@ -158,21 +158,23 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
         }
 
 def llm_rephrase_history(llm, messages: list[str]) -> str:
+    history = " | ".join(m.strip() for m in messages if m and m.strip())
+    
     prompt = f"""
     Ты получаешь историю сообщений пользователя, которые уточняют один и тот же запрос.
-    Перефразируй их в одно короткое и однозначное предложение, которое выражает суть.
+    Перефразируй их в одно короткое и однозначное предложение, которое выражает суть, убери повторы и лишние слова.
+    Верни ТОЛЬКО перефразированный запрос без каких-либо пояснений.
 
     История:
-    {" | ". join(messages)}
-
-    Верни только перефразированный запрос.
+    {history}
     """
 
     try:
         response = llm.invoke(prompt)
-        return (getattr(response, "content", "") or "").strip()
+        rephrased = (getattr(response, "content", "") or "").strip()
+        return rephrased or (messages[-1].strip() if messages else "")
     except Exception:
-        return messages[-1]
+        return messages[-1].strip() if messages else ""
 
 app = FastAPI()
 
@@ -209,6 +211,7 @@ async def chat(request: ChatRequest):
             # combined = " ".join(session["collected_messages"])
             # print(f"combined: {combined}")
 
+            logger.info(f"collected_messages: {session['collected_messages']}")
             rephrased = llm_rephrase_history(llm, session["collected_messages"])
 
             # assess = llm_assess_specificity(llm, combined)
@@ -251,8 +254,14 @@ async def chat(request: ChatRequest):
     label = llm_classify_intent(llm,request.message)
 
     if label == "GET_MANIFESTS":
-        assess = llm_assess_specificity(llm, request.message)
-        print(f"assess = {assess}")
+        rephrased = llm_rephrase_history(llm, [request.message])
+        logger.info("Hitting GET_MANIFESTS")
+        logger.info("request.message = %s", request.message)
+        logger.info("rephrased = %s", rephrased)
+        # assess = llm_assess_specificity(llm, request.message)
+        assess = llm_assess_specificity(llm, rephrased)
+        print(f"assess rephrased = {assess['is_specific']}")
+
         if not assess["is_specific"]:
             bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
             session_id = str(uuid.uuid4())
@@ -272,8 +281,11 @@ async def chat(request: ChatRequest):
                 session_id=session_id
             )
 
-        # query = assess["rephrased_query"] or combined
-        query = assess["rephrased_query"] or rephrased.strip()
+        # query = assess["rephrased_query"] or combined ORIGINAL
+        # query = (assess["rephrased_query"] or rephrased).strip()
+        query = rephrased.strip()
+        # query = assess["rephrased_query"] or request.message.strip()
+
         logger.info("GET_MANIFESTS: query = %s", query)
         return _start_manifest_flow_from_query(query)
 
