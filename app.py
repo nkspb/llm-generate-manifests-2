@@ -203,7 +203,7 @@ async def chat(request: ChatRequest):
                     session_id=request.session_id
                 )
             query = assess["rephrased_query"] or combined
-            session["mode"] = "MANIFEST"
+            # session["mode"] = "MANIFEST"
             return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
 
         if mode == "MANIFEST":
