@@ -157,6 +157,23 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
             ]
         }
 
+def llm_rephrase_history(llm, messages: list[str]) -> str:
+    prompt = f"""
+    Ты получаешь историю сообщений пользователя, которые уточняют один и тот же запрос.
+    Перефразируй их в одно короткое и однозначное предложение, которое выражает суть.
+
+    История:
+    {" | ". join(messages)}
+
+    Верни только перефразированный запрос.
+    """
+
+    try:
+        response = llm.invoke(prompt)
+        return (getattr(response, "content", "") or "").strip()
+    except Exception:
+        return messages[-1]
+
 app = FastAPI()
 
 # Async, so fastapi server can handle other things while waiting for response
@@ -189,10 +206,14 @@ async def chat(request: ChatRequest):
 
         if mode == "ASK_SCENARIO":
             session["collected_messages"].append(request.message)
-            combined = " ".join(session["collected_messages"])
-            print(f"combined: {combined}")
+            # combined = " ".join(session["collected_messages"])
+            # print(f"combined: {combined}")
 
-            assess = llm_assess_specificity(llm, combined)
+            rephrased = llm_rephrase_history(llm, session["collected_messages"])
+
+            # assess = llm_assess_specificity(llm, combined)
+            assess = llm_assess_specificity(llm, rephrased)
+
             if not assess["is_specific"]:
                 bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
                 return ChatResponse(
@@ -202,7 +223,9 @@ async def chat(request: ChatRequest):
                     reply=("Спасибо. Нужны еще детали: " + bullet_questions),
                     session_id=request.session_id
                 )
-            query = assess["rephrased_query"] or combined
+            # query = assess["rephrased_query"] or combined
+            query = assess["rephrased_query"] or rephrased.strip()
+            logger.info("ASK_SCENARIO query: %s", query)
             # session["mode"] = "MANIFEST"
             return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
 
@@ -249,7 +272,9 @@ async def chat(request: ChatRequest):
                 session_id=session_id
             )
 
-        query = assess["rephrased_query"] or combined
+        # query = assess["rephrased_query"] or combined
+        query = assess["rephrased_query"] or rephrased.strip()
+        logger.info("GET_MANIFESTS: query = %s", query)
         return _start_manifest_flow_from_query(query)
 
     if label == "HELP":
