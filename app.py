@@ -30,48 +30,52 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# Create dedicated logger for the app module
-# Since it is run directly, __name__ is __main__
 logger = logging.getLogger(__name__)
 
 # In-memory session store
 sessions = {}
 
-# Database directory
 VECTOR_DIR = "./database"
 
 # Load a list of documents with metadata
 docs = load_documents()
 
+# User request body in POST /get_manifests
 class QueryRequest(BaseModel):
     query: str
 
+# User request body in POST /reply
 class ReplyRequest(BaseModel):
     session_id: str
     message: str # user's message
 
+# User request body in POST /classify
 class ClassifyRequest(BaseModel):
     query: str
 
+# API response for POST /classify
 class ClassifyResponse(BaseModel):
     intent: str
 
+# User request body in POST /chat
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None # Optional session ID
 
+# API response for POST /chat
 class ChatResponse(BaseModel):
-    intent: Literal["GET_MANIFESTS", "HELP", "CHAT"] 
+    intent: Literal["GET_MANIFESTS", "HELP", "CHAT"] # Conversation intents
     action: Literal["CALL_GET_MANIFESTS", "ASK_SCENARIO", "NONE"] # For API calls actions
-    suggested_payload: Optional[dict] = None # Suggest what parameters to use next
+    suggested_payload: Optional[dict] = None # A hint to user with what API call to make next
     reply: str # Human-readable reply to the user
     session_id: Optional[str] = None # Session ID for continuing the conversation
 
 # Build vector store
-# hhsw - Hierarchical Navigable Small World (HNSW) algorithm
-# space - how distances between vectors are calculated
 def build_vector_store():
-    """Run on documents change"""
+    """
+    Build or rebuild the database
+    Run on documents change
+    """
     return Chroma.from_documents(
         documents=docs,
         embedding=embeddings,
@@ -80,26 +84,29 @@ def build_vector_store():
     )
 
 def load_vector_store():
-    """Run on app startup"""
+    """
+    Load the database
+    Run on app startup
+    """
     return Chroma(
-        persist_directory=VECTOR_DIR, # where the vector store is located
+        persist_directory=VECTOR_DIR,
         embedding_function=embeddings # embedding model for similarity search
     )
 
 # Check if database exists and create it if not
 if not os.path.exists(VECTOR_DIR):
-    logger.info("Database not found. Creating new one...")
+    logger.info("База данных не найдена. Создаем новую...")
     os.makedirs(VECTOR_DIR)
     build_vector_store()
 
+# Load the database with manifest templates
 vector_store = load_vector_store()
 
 def llm_classify_intent(llm, text: str) -> str:
-    """Определение цели запроса пользователя"""
-    prompt = f""" Ты - классификатор запросов пользователя. Выбери намерение пользователя
-    на основании его запроса:
+    """Determine the purpose of the user's request"""
+    prompt = f""" Ты - классификатор запросов пользователя. Выбери намерение пользователя на основании его запроса:
     - GET_MANIFESTS: запросил манифесты, yaml, интеграцию, сценарий и т.п.
-    - HELP: спрашивает, что ты умеешь, как работать с ботом, просит инструкцию
+    - HELP: спрашивает, что ты умеешь, как с тобой работать, просит инструкцию по твоему использованию
     - CHAT: любой другой запрос, который не требует манифестов
 
     Верни только одно слово: GET_MANIFESTS, HELP или CHAT
@@ -138,9 +145,13 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
 
     try:
         response = llm.invoke(prompt)
+        # If response is not a string and falsy, make sure at least string is returned
         raw = (getattr(response, "content", "") or "").strip()
         data = json.loads(raw)
 
+        # If LLM return a string or an empty string instead of list, return []
+        # If LLM returns a list, keep it
+        # If key is missing, nothing changes
         if not isinstance(data.get("followups", []), list):
             data["followups"] = []
         data["rephrased_query"] = data.get("rephrased_query") or ""
@@ -158,6 +169,9 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
         }
 
 def llm_rephrase_history(llm, messages: list[str]) -> str:
+    """
+    Rephrase user's request if it is vague or contains duplicates after combining user's previous messages
+    """
     history = " | ".join(m.strip() for m in messages if m and m.strip())
     
     prompt = f"""
@@ -178,7 +192,6 @@ def llm_rephrase_history(llm, messages: list[str]) -> str:
 
 app = FastAPI()
 
-# Async, so fastapi server can handle other things while waiting for response
 # curl -X GET http://localhost:5000/health
 @app.get("/health")
 async def health_check():
@@ -208,13 +221,8 @@ async def chat(request: ChatRequest):
 
         if mode == "ASK_SCENARIO":
             session["collected_messages"].append(request.message)
-            # combined = " ".join(session["collected_messages"])
-            # print(f"combined: {combined}")
-
             logger.info(f"collected_messages: {session['collected_messages']}")
             rephrased = llm_rephrase_history(llm, session["collected_messages"])
-
-            # assess = llm_assess_specificity(llm, combined)
             assess = llm_assess_specificity(llm, rephrased)
 
             if not assess["is_specific"]:
@@ -226,10 +234,8 @@ async def chat(request: ChatRequest):
                     reply=("Спасибо. Нужны еще детали: " + bullet_questions),
                     session_id=request.session_id
                 )
-            # query = assess["rephrased_query"] or combined
             query = assess["rephrased_query"] or rephrased.strip()
             logger.info("ASK_SCENARIO query: %s", query)
-            # session["mode"] = "MANIFEST"
             return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
 
         if mode == "MANIFEST":
@@ -281,10 +287,7 @@ async def chat(request: ChatRequest):
                 session_id=session_id
             )
 
-        # query = assess["rephrased_query"] or combined ORIGINAL
-        # query = (assess["rephrased_query"] or rephrased).strip()
         query = rephrased.strip()
-        # query = assess["rephrased_query"] or request.message.strip()
 
         logger.info("GET_MANIFESTS: query = %s", query)
         return _start_manifest_flow_from_query(query)
@@ -445,7 +448,6 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
     return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
 
 
-
 # If parameter is a Pydantic model, FastAPI reads it from request body
 # curl -X POST http://localhost:5000/get_manifests -H "Content-Type: application/json" -d '{"query": "Верни только темплейты для интеграции с postgress"}'
 @app.post("/get_manifests")
@@ -467,7 +469,10 @@ async def get_manifests(request: QueryRequest, fastapi_request: Request):
         )
     
     matched_doc, raw_score = results[0]
-    # EXAMPLE OUTPUT: Found document: {'description': 'Манифесты для интеграции Istio Service Mesh с PostgreSQL, c использованием Service Entry', 'keywords': 'istio, service mesh, postgresql, база данных, с service entry', 'source': 'manifests/istio_postgres_se.yaml'}, raw_score = 9622.58203125
+    # EXAMPLE OUTPUT: 
+    # Found document: {'description': 'Манифесты для интеграции Istio Service Mesh с PostgreSQL, 
+    # c использованием Service Entry', 'keywords': 'istio, service mesh, postgresql, база данных, с service entry', 
+    # 'source': 'manifests/istio_postgres_se.yaml'}, raw_score = 9622.58203125
     logger.debug("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
 
     doc_text = matched_doc.page_content
@@ -537,65 +542,12 @@ async def get_manifests(request: QueryRequest, fastapi_request: Request):
         media_type="text/plain"
     )
 
-# curl -X POST http://localhost:5000/reply -H "Content-Type: application/json" -d '{"message": "value", "session_id": "123"}
-# @app.post("/reply")
-# async def reply_to_llm(request: ReplyRequest):
-#     session_id = request.session_id
-#     user_input = request.message.strip()
-
-#     # Find the user session
-#     session = sessions.get(session_id)
-#     if not session:
-#         return PlainTextResponse(
-#             content="Сессия не найдена. Начните новую сессию.",
-#             status_code=404,
-#             media_type="text/plain"
-#         )
-    
-#     # Get current placeholder
-#     current_placeholder = session["current_placeholder"]
-#     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
-
-#     if not is_placeholder_valid(user_input, expected_type):
-#         return PlainTextResponse(
-#             content=f"`{{{{ ${current_placeholder }}}}}` ожидает значение с типом `{expected_type}`. Попробуйте снова: ",
-#             status_code=200,
-#             media_type="text/plain"
-#         )
-
-#     # If placeholder is valid, save its value to current session
-#     session["filled_values"][current_placeholder] = user_input
-
-#     # Check if there are remaining placeholders
-#     if session["remaining_placeholders"]:
-#         next_placeholder = session["remaining_placeholders"].pop(0)
-#         session["current_placeholder"] = next_placeholder
-
-#         # Ask user to fill in the next placeholder
-#         prompt = (
-#             f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-#             Объясни значение плейсхолдера `{{{{ ${next_placeholder} }}}}` и попроси пользователя ввести значение."""
-#         )
-#         llm_response = llm.invoke(prompt)
-#         ai_message = llm_response.content.strip()
-
-#         return PlainTextResponse(content=ai_message + "\n")
-#     else:
-#         resulting_yaml = session["original_doc_text"]
-#         print(session["filled_values"])
-#         resulting_yaml = fill_placeholders(resulting_yaml, session["filled_values"])
-
-#         # After all manifests are filled in, delete the session
-#         # del sessions[session_id]
-
-#         return PlainTextResponse(
-#             content=f"Все значения заполнены! Итоговые манифесты:\n\n + {resulting_yaml}",
-#             status_code=200,
-#             media_type="text/plain"
-#         )
-
 @app.post("/reply")
 async def reply_to_llm(request: ReplyRequest):
+    """
+    Handle reply when asked for next placeholder value.
+    If there are no more placeholders to fill, session is ended as done will become True.
+    """
     text, done = _handle_placeholder_reply(request.session_id, request.message)
     if done:
         sessions.pop(request.session_id, None)
