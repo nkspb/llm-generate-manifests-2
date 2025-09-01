@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from typing import Optional, Literal
 
-from pydantic import BaseModel # For validating user's POST request body
+from pydantic import BaseModel, ValidationError # For validating user's POST request body
 from placeholder_utils import extract_placeholders, PLACEHOLDER_TYPES, is_placeholder_valid, fill_placeholders
 
 import logging, os, uuid, json
@@ -70,6 +70,12 @@ class ChatResponse(BaseModel):
     reply: str # Human-readable reply to the user
     session_id: Optional[str] = None # Session ID for continuing the conversation
 
+# Expected response from LLM json
+class SpecificityModel(BaseModel):
+    is_specific: bool
+    rephrased_query: str = ""
+    followups: list[str] = []
+
 # Build vector store
 def build_vector_store():
     """
@@ -133,6 +139,11 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
     Если нет - предложи 2-4 коротких уточняющих вопроса.
     Если да - перефразируй запрос кратко и предметно.
 
+    Считай запрос достаточно специфичным, если он одновременно содержит:
+    1) "Явное упоминание istio/Istio/истио/Истио и"
+    2) "Конкретное название внешнего сервиса/БД/системы (например: secman, postgres, kafka, redis и т.д.)
+    Формулировки вида "Хочу...", "Нужны..." не влияют на специфичность."
+
     Верни строго JSON вида:
     {{
         "is_specific": true|false,
@@ -147,19 +158,18 @@ def llm_assess_specificity(llm, user_text: str) -> dict:
         response = llm.invoke(prompt)
         # If response is not a string and falsy, make sure at least string is returned
         raw = (getattr(response, "content", "") or "").strip()
-        data = json.loads(raw)
+        parsed = json.loads(raw)
 
-        # If LLM return a string or an empty string instead of list, return []
-        # If LLM returns a list, keep it
-        # If key is missing, nothing changes
-        if not isinstance(data.get("followups", []), list):
-            data["followups"] = []
-        data["rephrased_query"] = data.get("rephrased_query") or ""
-        data["is_specific"] = bool(data.get("is_specific", False))
+        # Validate & normalize the LLM response with Pydantic
+        model = SpecificityModel.model_validate(parsed)
+        data = model.model_dump()
+
         logger.info(f"data['is_specific']: {data['is_specific']}")
         logger.info(f"data['rephrased_query']: {data['rephrased_query']}")
         return data
+
     except Exception as e:
+        logger.error(f"Ошибка при оценке специфичности запроса: {e}")
         return {
             "is_specific": False,
             "rephrased_query": "",
@@ -254,7 +264,7 @@ async def chat(request: ChatRequest):
             intent="CHAT",
             action="NONE",
             suggested_payload=None,
-            reply="Сессия в неизвестном состоянии. Начните, пожалуйста, сначала."
+            reply="Сессия в неизвестном состоянии. Начните сначала."
         )
 
     label = llm_classify_intent(llm,request.message)
@@ -264,7 +274,6 @@ async def chat(request: ChatRequest):
         logger.info("Hitting GET_MANIFESTS")
         logger.info("request.message = %s", request.message)
         logger.info("rephrased = %s", rephrased)
-        # assess = llm_assess_specificity(llm, request.message)
         assess = llm_assess_specificity(llm, rephrased)
         print(f"assess rephrased = {assess['is_specific']}")
 
