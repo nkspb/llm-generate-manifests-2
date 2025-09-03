@@ -12,7 +12,7 @@ def is_placeholder_valid(value: str, expected_type: str) -> bool:
     elif expected_type == "str":
         return bool(value.strip())
     elif expected_type == "url":
-        return re.match(r'^https:?//', value.strip()) is not None
+        return re.match(r'^https?://', value.strip()) is not None
     return True
 
 def fill_placeholders(yaml_text: str, values: dict[str, str]) -> str:
