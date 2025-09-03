@@ -6,7 +6,7 @@ from fastapi.responses import PlainTextResponse
 from typing import Optional, Literal
 
 from pydantic import BaseModel, ValidationError # For validating user's POST request body
-from placeholder_utils import extract_placeholders, PLACEHOLDER_TYPES, is_placeholder_valid, fill_placeholders
+from placeholder_utils import extract_placeholders, PLACEHOLDER_TYPES, is_placeholder_valid, fill_placeholders, format_placeholder_list
 
 import logging, os, uuid, json
 
@@ -75,6 +75,15 @@ class SpecificityModel(BaseModel):
     is_specific: bool
     rephrased_query: str = ""
     followups: list[str] = []
+
+class MetaIntentModel(BaseModel):
+    intent: Literal[
+        "HOW_MANY_LEFT",
+        "LIST_PLACEHOLDERS",
+        "HELP",
+        "CANCEL",
+        "OTHER"
+    ]
 
 # Build vector store
 def build_vector_store():
@@ -377,6 +386,9 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
             "current_placeholder": None,
             "source_file": doc_source
         }
+
+        placeholder_list = format_placeholder_list(placeholders)
+
         return ChatResponse(
             intent="GET_MANIFESTS",
             action="NONE",
@@ -386,9 +398,17 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
         )
 
     first_placeholder = placeholders[0]
+
+    placeholder_list = format_placeholder_list(placeholders)
+    # intro = (
+    # f"""Нашел подходящие манифесты. Необходимо заполнить параметры:
+    # {placeholder_list}
+    # """
+    # )
     prompt = (
     f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-    Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты.
+    Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты, которые требуется заполнить: {placeholder_list}
+    Перечисли все поля, которые нужны для заполнения, с кратким описанием их назначения в одно предложение.
     Помоги пользователю заполнить YAML-файл манифеста, в котором есть плейсхолдер `{{{{ ${first_placeholder} }}}}`.
     Объясни его назначение и задай вопрос, чтобы получить значение.
     """
@@ -435,7 +455,7 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
 
     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
     if not is_placeholder_valid(user_input, expected_type):
-        return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}. Попробуйте снова:", False)
+        return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}`. Попробуйте снова:", False)
 
     # Save the value of current placeholder
     session["filled_values"][current_placeholder] = user_input
