@@ -85,6 +85,31 @@ class MetaIntentModel(BaseModel):
         "OTHER"
     ]
 
+def llm_detect_meta_intent(llm, user_text: str) -> str:
+    """For situations when a user enters a non-value during MANIFEST mode
+    Returns one of: HOW_MANY_LEFT, LIST_PLACEHOLDERS, HELP, CANCEL, OTHER"""
+
+    promt = f"""
+    Ты - классификатор коротких пользовательских сообщений, введенных во время заполнения плейсхолдеров в YAML.
+    Верни строго JSON одного из следующих видов, ничего кроме JSON не добавляй:
+
+    {{"intent": "HOW_MANY_LEFT"}} - если пользователь спрашивает, сколько плейсхолдеров или параметров осталось
+    {{"intent": "LIST_PLACEHOLDERS"}} - если пользователь спрашивает, какие плейсхолдеры или параметры есть, или что надо заполнить
+    {{"intent": "HELP"}} - если пользователь просит помощь, пишет "помощь", "что ты умеешь"
+    {{"intent": "CANCEL"}} - если пользователь хочет отменить заполнение, выйти из сессии или прекратить (например: "отмена", "стоп", "закончить")
+    {{"intent": "OTHER"}} - любое другое сообщение (в т.ч. случайный текст, который не является значением)
+    Текст: {user_text}
+    """
+    try:
+        resp = llm.invoke(prompt)
+        raw = (getattr(resp, "content", "") or "").strip()
+        data = MetaIntentModel.model_validate_json(raw)
+        return data.intent
+    except Exception as e:
+        # fallback in case of parsing failure or bad LLM output
+        return "OTHER"
+
+
 # Build vector store
 def build_vector_store():
     """
@@ -454,8 +479,34 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
         return (pretty, True)
 
     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
+
     if not is_placeholder_valid(user_input, expected_type):
+        intent = llm_detect_meta_intent(user_input, expected_type)
+
+        if intent == "HOW_MANY_LEFT":
+            return (_progress_text(session), False)
+
+        if intent == "LIST_PLACEHOLDERS":
+            return (_list_placeholders_text(session), False)
+
+        if intent == "HELP":
+            return(
+                "Вы на этапе заполнения YAML-манифеста.\n"
+                "- Введите значение текущего плейсхолдера.\n"
+                "- Или напишите 'отмена' для выхода.\n"
+                "- Или напишите 'список' для просмотра всех плейсхолдеров.\n"
+                "- Или напишите 'сколько осталось' для просмотра количества оставшихся плейсхолдеров.\n",
+                False
+            )
+
+        if intent == "CANCEL":
+            sessions.pop(session_id, None)
+            return ("Отменяю процесс. Вы можете начать заново", True)
+        
         return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}`. Попробуйте снова:", False)
+
+    # if not is_placeholder_valid(user_input, expected_type):
+        # return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}`. Попробуйте снова:", False)
 
     # Save the value of current placeholder
     session["filled_values"][current_placeholder] = user_input
@@ -475,6 +526,22 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
     rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
     pretty = f"Все значения заполнены. Итоговые манифесты:\n\n```yaml\n{rendered}\n```"
     return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
+
+def _progress_text(session: dict) -> str:
+    total = len(session["remaining_placeholders"]) + len(session["filled_values"])
+    filled = len(session["filled_values"])
+    remaining = session["remaining_placeholders"]
+    return f"Вы заполнили {filled} из ${total} полей. Осталось {total - filled}.\Текущие плейсхолдеры: {', '.join(remaining) if remaining else 'Все заполнены!'}"
+
+def _list_placeholders_text(session: dict) -> str:
+    placeholders = extract_placeholders(session["original_doc_text"])
+    status_lines = []
+    for placeholder in placeholders:
+        if placeholder in session["filled_values"]:
+            status_lines.append(f"- {placeholder} заполнен {session['filled_values'][placeholder]}")
+        else:
+            status_lines.append(f"- {placeholder} не заполнен")
+    return "Список всех плейсхолдеров:\n" + "\n".join(status_lines)
 
 
 # If parameter is a Pydantic model, FastAPI reads it from request body
