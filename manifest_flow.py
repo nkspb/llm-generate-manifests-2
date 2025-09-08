@@ -50,7 +50,7 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, sessions: dict
             suggested_payload=None,
             reply=("К сожалению, не удалось найти подходящий манифест. Попробуйте другой запрос.\n"),
             session_id=reuse_session_id
-        )
+        ).dict()
     placeholders = extract_placeholders(doc_text)
 
     session_id = reuse_session_id or str(uuid.uuid4())
