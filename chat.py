@@ -45,7 +45,7 @@ async def chat(request: ChatRequest):
                 )
             query = assess["rephrased_query"] or rephrased.strip()
             logger.info("ASK_SCENARIO query: %s", query)
-            return start_manifest_flow_from_query(query, vector_store, llm, sessions, reuse_session_id=request.session_id)
+            return ChatResponse(**start_manifest_flow_from_query(query, vector_store, llm, sessions, reuse_session_id=request.session_id))
 
         if mode == "MANIFEST":
             text, done = handle_placeholder_reply(llm, request.session_id, sessions, request.message)
@@ -98,7 +98,7 @@ async def chat(request: ChatRequest):
         query = rephrased.strip()
 
         logger.info("GET_MANIFESTS: query = %s", query)
-        return start_manifest_flow_from_query(query, vector_store, llm, sessions)
+        return ChatResponse(**start_manifest_flow_from_query(query, vector_store, llm, sessions))
 
     if label == "HELP":
         return ChatResponse(
