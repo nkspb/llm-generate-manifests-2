@@ -4,11 +4,21 @@ from documents import load_documents
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from typing import Optional, Literal
+from routes import chat
 
 from pydantic import BaseModel, ValidationError # For validating user's POST request body
 from placeholder_utils import extract_placeholders, PLACEHOLDER_TYPES, is_placeholder_valid, fill_placeholders, format_placeholder_list
 
 import logging, os, uuid, json
+
+from core.llm_utils import (
+    llm_classify_intent,
+    llm_assess_specificity,
+    llm_detect_meta_intent,
+    llm_rephrase_history
+)
+
+from core.placeholder_engine import handle_placeholder_reply
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
@@ -70,52 +80,6 @@ class ChatResponse(BaseModel):
     reply: str # Human-readable reply to the user
     session_id: Optional[str] = None # Session ID for continuing the conversation
 
-# Expected response from LLM json
-class SpecificityModel(BaseModel):
-    is_specific: bool
-    rephrased_query: str = ""
-    followups: list[str] = []
-
-class MetaIntentModel(BaseModel):
-    intent: Literal[
-        "HOW_MANY_LEFT",
-        "LIST_PLACEHOLDERS",
-        "HELP",
-        "CANCEL",
-        "OTHER"
-    ]
-
-def llm_detect_meta_intent(llm, user_text: str) -> str:
-    """For situations when a user enters a non-value during MANIFEST mode
-    Returns one of: HOW_MANY_LEFT, LIST_PLACEHOLDERS, HELP, CANCEL, OTHER"""
-
-    prompt = f"""
-    Ты - классификатор коротких пользовательских сообщений, введенных во время заполнения плейсхолдеров в YAML.
-    Верни строго JSON одного из следующих видов, ничего кроме JSON не добавляй:
-
-    {{"intent": "HOW_MANY_LEFT"}} - если пользователь спрашивает, сколько плейсхолдеров или параметров осталось
-    {{"intent": "LIST_PLACEHOLDERS"}} - если пользователь спрашивает, какие плейсхолдеры или параметры есть, или что надо заполнить
-    {{"intent": "HELP"}} - если пользователь просит помощь, пишет "помощь", "что ты умеешь"
-    {{"intent": "CANCEL"}} - если пользователь хочет отменить заполнение, выйти из сессии или прекратить (например: "отмена", "стоп", "закончить")
-    {{"intent": "OTHER"}} - любое другое сообщение (в т.ч. случайный текст, который не является значением)
-    Текст: {user_text}
-    """
-    try:
-        resp = llm.invoke(prompt)
-        raw = (getattr(resp, "content", "") or "").strip()
-        logger.info(f"[MetaIntent] LLM raw = {raw}")
-
-        parsed = json.loads(raw)
-        logger.info(f"[MetaIntent] Parsed JSON: {parsed}")
-
-        model = MetaIntentModel.model_validate(parsed)
-        return model.intent
-    except Exception as e:
-        # fallback in case of parsing failure or bad LLM output
-        logger.warning(f"[MetaIntent] Parsing failed: {e}")
-        return "OTHER"
-
-
 # Build vector store
 def build_vector_store():
     """
@@ -148,100 +112,14 @@ if not os.path.exists(VECTOR_DIR):
 # Load the database with manifest templates
 vector_store = load_vector_store()
 
-def llm_classify_intent(llm, text: str) -> str:
-    """Determine the purpose of the user's request"""
-    prompt = f""" Ты - классификатор запросов пользователя. Выбери намерение пользователя на основании его запроса:
-    - GET_MANIFESTS: запросил манифесты, yaml, интеграцию, сценарий и т.п.
-    - HELP: спрашивает, что ты умеешь, как с тобой работать, просит инструкцию по твоему использованию
-    - CHAT: любой другой запрос, который не требует манифестов
-
-    Верни только одно слово: GET_MANIFESTS, HELP или CHAT
-
-    Пользователь: {text}
-    """
-
-    try:
-        response = llm.invoke(prompt)
-        label = (getattr(response, "content", "") or "").strip().upper()
-        logger.info(f"llm_classify_intent label: {label}")
-        if label in ["GET_MANIFESTS", "HELP", "CHAT"]:
-            return label
-    except Exception as e:
-        logger.error(f"Произошла ошибка при классификации запроса пользователя: {e}")
-        return "CHAT"
-
-def llm_assess_specificity(llm, user_text: str) -> dict:
-    """
-    Запрос к LLM для оценки, насколько запрос пользователя позволяет понять, какие манифесты генерировать
-    """
-    prompt = f""" Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-    Определи, достаточно ли специфичен запрос пользователя, чтобы искать нужные манифесты (True/False).
-    Если нет - предложи 2-4 коротких уточняющих вопроса.
-    Если да - перефразируй запрос кратко и предметно.
-
-    Считай запрос достаточно специфичным, если он одновременно содержит:
-    1) "Явное упоминание istio/Istio/истио/Истио и"
-    2) "Конкретное название внешнего сервиса/БД/системы (например: secman, postgres, kafka, redis и т.д.)
-    Формулировки вида "Хочу...", "Нужны..." не влияют на специфичность."
-
-    Верни строго JSON вида:
-    {{
-        "is_specific": true|false,
-        "rephrased_query": "строка (может быть пустой)",
-        "followups": ["вопрос1", "вопрос2", ...]
-    }}
-
-    Запрос: {user_text}
-    """
-
-    try:
-        response = llm.invoke(prompt)
-        # If response is not a string and falsy, make sure at least string is returned
-        raw = (getattr(response, "content", "") or "").strip()
-        parsed = json.loads(raw)
-
-        # Validate & normalize the LLM response with Pydantic
-        model = SpecificityModel.model_validate(parsed)
-        data = model.model_dump()
-
-        logger.info(f"data['is_specific']: {data['is_specific']}")
-        logger.info(f"data['rephrased_query']: {data['rephrased_query']}")
-        return data
-
-    except Exception as e:
-        logger.error(f"Ошибка при оценке специфичности запроса: {e}")
-        return {
-            "is_specific": False,
-            "rephrased_query": "",
-            "followups": [
-                "С каким сервисом вы хотите интегрировать istio service mesh?",
-            ]
-        }
-
-def llm_rephrase_history(llm, messages: list[str]) -> str:
-    """
-    Rephrase user's request if it is vague or contains duplicates after combining user's previous messages
-    """
-    history = " | ".join(m.strip() for m in messages if m and m.strip())
-    
-    prompt = f"""
-    Ты получаешь историю сообщений пользователя, которые уточняют один и тот же запрос.
-    Перефразируй их в одно короткое и однозначное предложение, которое выражает суть, убери повторы и лишние слова.
-    Верни ТОЛЬКО перефразированный запрос без каких-либо пояснений.
-
-    История:
-    {history}
-    """
-
-    try:
-        response = llm.invoke(prompt)
-        rephrased = (getattr(response, "content", "") or "").strip()
-        return rephrased or (messages[-1].strip() if messages else "")
-    except Exception:
-        return messages[-1].strip() if messages else ""
+for module in [chat]:
+    module.sessions = sessions
+    module.llm = llm
+    if hasattr(module, "vector_store"):
+        module.vector_store = vector_store
 
 app = FastAPI()
-
+app.include_router(chat.router)
 # curl -X GET http://localhost:5000/health
 @app.get("/health")
 async def health_check():
@@ -254,179 +132,6 @@ async def classify(request: ClassifyRequest):
     label = llm_classify_intent(llm, request.query)
     print(label)
     return ClassifyResponse(intent=label)
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    if request.session_id:
-        session = sessions.get(request.session_id)
-        if not session:
-            return ChatResponse(
-                intent="CHAT",
-                action="NONE",
-                suggested_payload=None,
-                reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
-            )
-
-        mode = session.get("mode")
-
-        if mode == "ASK_SCENARIO":
-            session["collected_messages"].append(request.message)
-            logger.info(f"collected_messages: {session['collected_messages']}")
-            rephrased = llm_rephrase_history(llm, session["collected_messages"])
-            assess = llm_assess_specificity(llm, rephrased)
-
-            if not assess["is_specific"]:
-                bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
-                return ChatResponse(
-                    intent="GET_MANIFESTS",
-                    action="ASK_SCENARIO",
-                    suggested_payload=None,
-                    reply=("Спасибо. Нужны еще детали: " + bullet_questions),
-                    session_id=request.session_id
-                )
-            query = assess["rephrased_query"] or rephrased.strip()
-            logger.info("ASK_SCENARIO query: %s", query)
-            return _start_manifest_flow_from_query(query, reuse_session_id=request.session_id)
-
-        if mode == "MANIFEST":
-            text, done = _handle_placeholder_reply(request.session_id, request.message)
-            if done:
-                sessions.pop(request.session_id, None)
-            return ChatResponse(
-                intent="GET_MANIFESTS",
-                action="NONE",
-                suggested_payload=None,
-                reply=text,
-                session_id=None if done else request.session_id
-            )
-
-        return ChatResponse(
-            intent="CHAT",
-            action="NONE",
-            suggested_payload=None,
-            reply="Сессия в неизвестном состоянии. Начните сначала."
-        )
-
-    label = llm_classify_intent(llm,request.message)
-
-    if label == "GET_MANIFESTS":
-        rephrased = llm_rephrase_history(llm, [request.message])
-        logger.info("Hitting GET_MANIFESTS")
-        logger.info("request.message = %s", request.message)
-        logger.info("rephrased = %s", rephrased)
-        assess = llm_assess_specificity(llm, rephrased)
-        print(f"assess rephrased = {assess['is_specific']}")
-
-        if not assess["is_specific"]:
-            bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
-            session_id = str(uuid.uuid4())
-            print(f"GET_MANIFESTS: session_id = {session_id}")
-            sessions[session_id] = {
-                "mode": "ASK_SCENARIO",
-                "collected_messages": [request.message]
-            }
-            return ChatResponse(
-                intent="GET_MANIFESTS",
-                action="ASK_SCENARIO",
-                suggested_payload=None,
-                reply=(
-                    "Уточните, пожалуйста, какую интеграцию вы хотите настроить:\n"
-                    f"{bullet_questions}"
-                ),
-                session_id=session_id
-            )
-
-        query = rephrased.strip()
-
-        logger.info("GET_MANIFESTS: query = %s", query)
-        return _start_manifest_flow_from_query(query)
-
-    if label == "HELP":
-        return ChatResponse(
-            intent=label,
-            action="NONE",
-            suggested_payload=None,
-            reply=(
-                "Я помогаю сгенерировать YAML-манифесты для интеграции istio service mesh с другими сервисами"
-            ),
-        )
-
-    try:
-        response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
-        text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
-    except Exception:
-        text = "Привет! Опишите, какой сценарий вас интересует."
-    return ChatResponse(
-        intent="CHAT",
-        action="NONE",
-        suggested_payload=None,
-        reply=text,
-    )
-
-def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] = None) -> "ChatResponse":
-    """
-        Same logics as in get_manifests, 
-        but returns ChatResponse so that /chat could perform the flow
-    """
-    try:
-        results = vector_store.similarity_search_with_score(query, k=1)
-    except Exception as e:
-        logger.error(f"Произошла ошибка при поиске по векторной базе: {e}")
-        return ChatResponse(
-            intent="GET_MANIFESTS",
-            action="NONE",
-            suggested_payload=None,
-            reply="Произошла ошибка при поиске манифестов. Попробуйте другой запрос.",
-            session_id=reuse_session_id
-        )
-
-    if not results:
-        return ChatResponse(
-            intent="GET_MANIFESTS",
-            action="NONE",
-            suggested_payload=None,
-            reply=("К сожалению, не удалось найти подходящий манифест. Попробуйте другой запрос.\n"),
-            session_id=reuse_session_id
-        )
-
-    matched_doc, raw_score = results[0]
-    logger.debug("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
-
-    doc_text = matched_doc.page_content
-    doc_source = matched_doc.metadata.get("source", "source unknown")
-
-    similarity = 1 - raw_score
-    SIMILARITY_THRESHOLD = 0.4
-    if similarity < SIMILARITY_THRESHOLD:
-        return ChatResponse(
-            intent="GET_MANIFESTS",
-            action="NONE",
-            suggested_payload=None,
-            reply=("К сожалению, не удалось найти подходящий манифест. Попробуйте другой запрос.\n"),
-            session_id=reuse_session_id
-        )
-    placeholders = extract_placeholders(doc_text)
-
-    session_id = reuse_session_id or str(uuid.uuid4())
-    if not placeholders:
-        sessions[session_id] = {
-            "mode": "MANIFEST",
-            "original_doc_text": doc_text,
-            "remaining_placeholders": [],
-            "filled_values": {},
-            "current_placeholder": None,
-            "source_file": doc_source
-        }
-
-        placeholder_list = format_placeholder_list(placeholders)
-
-        return ChatResponse(
-            intent="GET_MANIFESTS",
-            action="NONE",
-            suggested_payload=None,
-            reply=("Манифест найден. Необходимо заполнить все поля. Отправьте render, чтобы показать их\n"),
-            session_id=session_id
-        )
 
     first_placeholder = placeholders[0]
 
@@ -465,89 +170,9 @@ def _start_manifest_flow_from_query(query: str, reuse_session_id: Optional[str] 
         session_id=session_id
     )
 
-def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bool]:
-    """Shared logic for filling placeholders.
-    Returns (reply_text, done).
-    If done=True, session is complete and manifests are rendered"""
 
-    # Search for current active session
-    session = sessions.get(session_id)
-    if not session:
-        return ("Сессия не найдена. Начните новую сессию.", True)
 
-    user_input = user_input.strip()
-    current_placeholder = session.get("current_placeholder")
 
-    # If there are no more placeholders, make substitutions and render manifests
-    if current_placeholder is None and not session["remaining_placeholders"]:
-        rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
-        pretty = f"Все значения заполнены. Итоговые манифесты:\n\n```yaml\n{rendered}\n```"
-        return (pretty, True)
-
-    expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
-
-    if not is_placeholder_valid(user_input, expected_type):
-        intent = llm_detect_meta_intent(llm, user_input)
-        logger.info(f"intent: {intent}")
-        if intent == "HOW_MANY_LEFT":
-            return (_progress_text(session), False)
-
-        if intent == "LIST_PLACEHOLDERS":
-            return (_list_placeholders_text(session), False)
-
-        if intent == "HELP":
-            return(
-                "Вы на этапе заполнения YAML-манифеста.\n"
-                "- Введите значение текущего плейсхолдера.\n"
-                "- Или напишите 'отмена' для выхода.\n"
-                "- Или напишите 'список' для просмотра всех плейсхолдеров.\n"
-                "- Или напишите 'сколько осталось' для просмотра количества оставшихся плейсхолдеров.\n",
-                False
-            )
-
-        if intent == "CANCEL":
-            sessions.pop(session_id, None)
-            return ("Отменяю процесс. Вы можете начать заново", True)
-        
-        return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}`. Попробуйте снова:", False)
-
-    # if not is_placeholder_valid(user_input, expected_type):
-        # return (f"`{{{{ ${current_placeholder} }}}}` ожидает тип `{expected_type}`. Попробуйте снова:", False)
-
-    # Save the value of current placeholder
-    session["filled_values"][current_placeholder] = user_input
-
-    if session["remaining_placeholders"]:
-        next_placeholder = session["remaining_placeholders"].pop(0)
-        session["current_placeholder"] = next_placeholder
-
-        try:
-            prompt = f"Объясни значение плейсхолдера `{{{{ ${next_placeholder} }}}}` и попроси пользователя ввести значение."
-            response = llm.invoke(prompt)
-            text = (getattr(response, "content", "") or "").strip()
-        except Exception:
-            text = f"Введите значение для ${{{next_placeholder}}}:"
-        return (text, False)
-    
-    rendered = fill_placeholders(session["original_doc_text"], session["filled_values"])
-    pretty = f"Все значения заполнены. Итоговые манифесты:\n\n```yaml\n{rendered}\n```"
-    return ("Все значения заполнены! Итоговые манифесты:\n\n" + rendered, True)
-
-def _progress_text(session: dict) -> str:
-    total = len(session["remaining_placeholders"]) + len(session["filled_values"])
-    filled = len(session["filled_values"])
-    remaining = session["remaining_placeholders"]
-    return f"Вы заполнили {filled} из ${total} полей. Осталось {total - filled}.\Текущие плейсхолдеры: {', '.join(remaining) if remaining else 'Все заполнены!'}"
-
-def _list_placeholders_text(session: dict) -> str:
-    placeholders = extract_placeholders(session["original_doc_text"])
-    status_lines = []
-    for placeholder in placeholders:
-        if placeholder in session["filled_values"]:
-            status_lines.append(f"- {placeholder} заполнен {session['filled_values'][placeholder]}")
-        else:
-            status_lines.append(f"- {placeholder} не заполнен")
-    return "Список всех плейсхолдеров:\n" + "\n".join(status_lines)
 
 
 # If parameter is a Pydantic model, FastAPI reads it from request body
@@ -650,7 +275,7 @@ async def reply_to_llm(request: ReplyRequest):
     Handle reply when asked for next placeholder value.
     If there are no more placeholders to fill, session is ended as done will become True.
     """
-    text, done = _handle_placeholder_reply(request.session_id, request.message)
+    text, done = handle_placeholder_reply(llm, request.session_id, request.message)
     if done:
         sessions.pop(request.session_id, None)
     return PlainTextResponse(content=text)
