@@ -89,7 +89,7 @@ def llm_detect_meta_intent(llm, user_text: str) -> str:
     """For situations when a user enters a non-value during MANIFEST mode
     Returns one of: HOW_MANY_LEFT, LIST_PLACEHOLDERS, HELP, CANCEL, OTHER"""
 
-    promt = f"""
+    prompt = f"""
     Ты - классификатор коротких пользовательских сообщений, введенных во время заполнения плейсхолдеров в YAML.
     Верни строго JSON одного из следующих видов, ничего кроме JSON не добавляй:
 
@@ -103,10 +103,16 @@ def llm_detect_meta_intent(llm, user_text: str) -> str:
     try:
         resp = llm.invoke(prompt)
         raw = (getattr(resp, "content", "") or "").strip()
-        data = MetaIntentModel.model_validate_json(raw)
-        return data.intent
+        logger.info(f"[MetaIntent] LLM raw = {raw}")
+
+        parsed = json.loads(raw)
+        logger.info(f"[MetaIntent] Parsed JSON: {parsed}")
+
+        model = MetaIntentModel.model_validate(parsed)
+        return model.intent
     except Exception as e:
         # fallback in case of parsing failure or bad LLM output
+        logger.warning(f"[MetaIntent] Parsing failed: {e}")
         return "OTHER"
 
 
@@ -481,8 +487,8 @@ def _handle_placeholder_reply(session_id: str, user_input: str) -> tuple[str, bo
     expected_type = PLACEHOLDER_TYPES.get(current_placeholder, "str")
 
     if not is_placeholder_valid(user_input, expected_type):
-        intent = llm_detect_meta_intent(user_input, expected_type)
-
+        intent = llm_detect_meta_intent(llm, user_input)
+        logger.info(f"intent: {intent}")
         if intent == "HOW_MANY_LEFT":
             return (_progress_text(session), False)
 
