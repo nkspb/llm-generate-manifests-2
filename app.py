@@ -133,48 +133,6 @@ async def classify(request: ClassifyRequest):
     print(label)
     return ClassifyResponse(intent=label)
 
-    first_placeholder = placeholders[0]
-
-    placeholder_list = format_placeholder_list(placeholders)
-    # intro = (
-    # f"""Нашел подходящие манифесты. Необходимо заполнить параметры:
-    # {placeholder_list}
-    # """
-    # )
-    prompt = (
-    f"""Ты - ассистент, который помогает пользователю сформировать манифесты для интеграции сервисов.
-    Поприветствуй пользователя и скажи ему, что нашел необходимые манифесты, которые требуется заполнить: {placeholder_list}
-    Перечисли все поля, которые нужны для заполнения, с кратким описанием их назначения в одно предложение.
-    Помоги пользователю заполнить YAML-файл манифеста, в котором есть плейсхолдер `{{{{ ${first_placeholder} }}}}`.
-    Объясни его назначение и задай вопрос, чтобы получить значение.
-    """
-    )
-    llm_response = llm.invoke(prompt)
-    ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
-
-    sessions[session_id] = {
-        "mode": "MANIFEST",
-        "original_doc_text": doc_text,
-        "remaining_placeholders": placeholders[1:],
-        "filled_values": {},
-        "current_placeholder": first_placeholder,
-        "source_file": doc_source
-    }
-    logger.info("[CHAT manifests] New session created: %s", session_id)
-
-    return ChatResponse(
-        intent="GET_MANIFESTS",
-        action="NONE",
-        suggested_payload=None,
-        reply=ai_message,
-        session_id=session_id
-    )
-
-
-
-
-
-
 # If parameter is a Pydantic model, FastAPI reads it from request body
 # curl -X POST http://localhost:5000/get_manifests -H "Content-Type: application/json" -d '{"query": "Верни только темплейты для интеграции с postgress"}'
 @app.post("/get_manifests")
