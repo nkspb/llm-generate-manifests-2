@@ -3,13 +3,14 @@ import logging
 from models import ChatResponse
 from typing import Optional
 from core.placeholder_engine import extract_placeholders
-from placeholder_utils import format_placeholder_list
+from core.placeholder_engine import format_placeholder_list
+from core.session_manager import SessionStore, SessionState
 
 logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.4
 
-def start_manifest_flow_from_query(query: str, vector_store, llm, sessions: dict, reuse_session_id: Optional[str] = None) -> ChatResponse:
+def start_manifest_flow_from_query(query: str, vector_store, llm, session_store: SessionStore, reuse_session_id: Optional[str] = None) -> ChatResponse:
     """
         Same logics as in get_manifests, 
         but returns ChatResponse so that /chat could perform the flow
@@ -52,30 +53,28 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, sessions: dict
             session_id=reuse_session_id
         )
     placeholders = extract_placeholders(doc_text)
+    first_placeholder = placeholders[0] if placeholders else None
+    placeholder_list = format_placeholder_list(placeholders)
 
-    session_id = reuse_session_id or str(uuid.uuid4())
-    if not placeholders:
-        sessions[session_id] = {
-            "mode": "MANIFEST",
-            "original_doc_text": doc_text,
-            "remaining_placeholders": [],
-            "filled_values": {},
-            "current_placeholder": None,
-            "source_file": doc_source
-        }
-
-        placeholder_list = format_placeholder_list(placeholders)
-
+    if not first_placeholder:
+        state = SessionState(
+            mode="MANIFEST",
+            original_doc_text=doc_text,
+            remaining_placeholders=placeholders[1:],
+            filled_values={},
+            current_placeholder=first_placeholder,
+            source_file=doc_source
+        )
+        session_id = session_store.create(state, reuse_session_id)
         return ChatResponse(
             intent="GET_MANIFESTS",
             action="NONE",
             suggested_payload=None,
             reply=("Манифест найден. Необходимо заполнить все поля. Отправьте render, чтобы показать их\n"),
             session_id=session_id
-        )
+    )
 
-    first_placeholder = placeholders[0]
-    placeholder_list = format_placeholder_list(placeholders)
+
     # intro = (
     # f"""Нашел подходящие манифесты. Необходимо заполнить параметры:
     # {placeholder_list}
@@ -92,14 +91,16 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, sessions: dict
     llm_response = llm.invoke(prompt)
     ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
 
-    sessions[session_id] = {
-        "mode": "MANIFEST",
-        "original_doc_text": doc_text,
-        "remaining_placeholders": placeholders[1:],
-        "filled_values": {},
-        "current_placeholder": first_placeholder,
-        "source_file": doc_source
-    }
+    state = SessionState(
+        mode="MANIFEST",
+        original_doc_text=doc_text,
+        remaining_placeholders=placeholders[1:],
+        filled_values={},
+        current_placeholder=first_placeholder,
+        source_file=doc_source
+    )
+
+    session_id = session_store.create(state, reuse_session_id)
     logger.info("[CHAT manifests] New session created: %s", session_id)
 
     return ChatResponse(
