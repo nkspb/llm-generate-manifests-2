@@ -2,24 +2,24 @@ from fastapi import APIRouter
 from models import ChatRequest, ChatResponse
 from core.llm_utils import llm_classify_intent, llm_rephrase_history, llm_assess_specificity
 from core.placeholder_engine import handle_placeholder_reply, extract_placeholders, fill_placeholders
-from core.manifest_flow import start_manifest_flow_from_query
+# from core.manifest_flow import start_manifest_flow_from_query
+from core.manifest_engine import start_manifest_flow_from_query
 import uuid, logging
 from core.placeholder_engine import format_placeholder_list
+from core.session_manager import SessionStore, SessionState
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 from models import ChatResponse, ChatRequest
 
-sessions = {} # Should ideally be imported or injected
+session_store: SessionStore = None # Should ideally be imported or injected
 vector_store = None # Must be injected from app.py
 llm = None # Same here
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    global sessions
-
     if request.session_id:
-        session = sessions.get(request.session_id)
+        session = session_store.get(request.session_id)
         if not session:
             return ChatResponse(
                 intent="CHAT",
@@ -28,16 +28,15 @@ async def chat(request: ChatRequest):
                 reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
             )
 
-        mode = session.get("mode")
-
-        if mode == "ASK_SCENARIO":
-            session["collected_messages"].append(request.message)
-            logger.info(f"collected_messages: {session['collected_messages']}")
-            rephrased = llm_rephrase_history(llm, session["collected_messages"])
+        if session.mode == "ASK_SCENARIO":
+            session.collected_messages.append(request.message)
+            logger.info(f"collected_messages: {session.collected_messages}")
+            rephrased = llm_rephrase_history(llm, session.collected_messages)
             assess = llm_assess_specificity(llm, rephrased)
 
             if not assess["is_specific"]:
                 bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
+                session_store.save(request.session_id, session)
                 return ChatResponse(
                     intent="GET_MANIFESTS",
                     action="ASK_SCENARIO",
@@ -45,14 +44,15 @@ async def chat(request: ChatRequest):
                     reply=("Спасибо. Нужны еще детали: " + bullet_questions),
                     session_id=request.session_id
                 )
+
             query = assess["rephrased_query"] or rephrased.strip()
             logger.info("ASK_SCENARIO query: %s", query)
-            return start_manifest_flow_from_query(query, vector_store, llm, sessions, reuse_session_id=request.session_id)
+            return start_manifest_flow_from_query(query, vector_store, llm, session_store, reuse_session_id=request.session_id)
 
-        if mode == "MANIFEST":
-            text, done = handle_placeholder_reply(llm, request.session_id, sessions, request.message)
+        if session.mode == "MANIFEST":
+            text, done = handle_placeholder_reply(llm, request.session_id, session_store, request.message)
             if done:
-                sessions.pop(request.session_id, None)
+                session_store.end(request.session_id)
             return ChatResponse(
                 intent="GET_MANIFESTS",
                 action="NONE",
@@ -82,10 +82,11 @@ async def chat(request: ChatRequest):
             bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
             session_id = str(uuid.uuid4())
             print(f"GET_MANIFESTS: session_id = {session_id}")
-            sessions[session_id] = {
-                "mode": "ASK_SCENARIO",
-                "collected_messages": [request.message]
-            }
+            session_store.create(SessionState(
+                mode="ASK_SCENARIO",
+                collected_messages=[request.message]
+            ), reuse_session_id=session_id)
+        
             return ChatResponse(
                 intent="GET_MANIFESTS",
                 action="ASK_SCENARIO",
@@ -100,7 +101,7 @@ async def chat(request: ChatRequest):
         query = rephrased.strip()
 
         logger.info("GET_MANIFESTS: query = %s", query)
-        return start_manifest_flow_from_query(query, vector_store, llm, sessions)
+        return start_manifest_flow_from_query(query, vector_store, llm, session_store)
 
     if label == "HELP":
         return ChatResponse(
