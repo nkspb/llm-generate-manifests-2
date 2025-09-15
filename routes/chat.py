@@ -10,8 +10,6 @@ from core.session_manager import SessionStore, SessionState
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-from models import ChatResponse, ChatRequest
-
 session_store: SessionStore = None # Should ideally be imported or injected
 vector_store = None # Must be injected from app.py
 llm = None # Same here
@@ -19,6 +17,7 @@ llm = None # Same here
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     if request.session_id:
+        # Retrieve session from SessionStore
         session = session_store.get(request.session_id)
         if not session:
             return ChatResponse(
@@ -29,6 +28,7 @@ async def chat(request: ChatRequest):
             )
 
         if session.mode == "ASK_SCENARIO":
+            # Append message and update session
             session.collected_messages.append(request.message)
             logger.info(f"collected_messages: {session.collected_messages}")
             rephrased = llm_rephrase_history(llm, session.collected_messages)
@@ -50,6 +50,7 @@ async def chat(request: ChatRequest):
             return start_manifest_flow_from_query(query, vector_store, llm, session_store, reuse_session_id=request.session_id)
 
         if session.mode == "MANIFEST":
+            # Pass session_store to placeholder handler
             text, done = handle_placeholder_reply(llm, request.session_id, session_store, request.message)
             if done:
                 session_store.end(request.session_id)
@@ -82,6 +83,7 @@ async def chat(request: ChatRequest):
             bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
             session_id = str(uuid.uuid4())
             print(f"GET_MANIFESTS: session_id = {session_id}")
+            # Create new ASK_SCENARIO session in store
             session_store.create(SessionState(
                 mode="ASK_SCENARIO",
                 collected_messages=[request.message]
