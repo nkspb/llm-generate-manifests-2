@@ -1,0 +1,197 @@
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: {{ $serverHostDB1 }}
+spec:
+  addresses:
+    - {{ $serverHostDB1ip }}       
+  endpoints:
+    - address: {{ $serverHostDB1ip }}
+  exportTo:
+    - .
+  hosts:
+    - {{ $serverHostDB1 }}
+  location: MESH_EXTERNAL
+  ports:
+    - name: postgres-{{ $serverPort }}
+      number: {{ $serverPort }} 
+      protocol: postgres
+  resolution: DNS
+
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: egress-db-se-{{ $serverHostDB2 }}
+spec:
+  addresses:
+    - {{ $serverHostDB2ip }}
+  endpoints:
+    - {{ $serverHostDB2ip }}
+  exportTo:
+    - .
+  hosts:
+    - {{ $serverHostDB2 }}
+  location: MESH_EXTERNAL
+  ports:
+    - name: postgres-{{ $serverPort }}
+      number: {{ $serverPort }}
+      protocol: postgres
+  resolution: DNS
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: egress-postgres-svc
+spec:
+  ports:
+    - name: tcp-{{ $virtualPortDB1 }}
+      protocol: TCP
+      port: {{ $virtualPortDB1 }}
+      targetPort: {{ $virtualPortDB1 }}
+    - name: tcp-{{ $virtualPortDB2 }}
+      protocol: TCP
+      port: {{ $virtualPortDB2 }}
+      targetPort: {{ $virtualPortDB2 }}
+  selector:
+    app: {{ $egressLabel }}
+    istio: {{ $egressLabel }}
+
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: egress-db-gw-{{ $serverHostDB1 }}
+spec:
+  selector:
+    app: {{ $egressLabel }}
+    istio: {{ $egressLabel }}
+  servers:
+    - hosts:
+        - {{ $serverHostDB1 }}
+      port:
+        name: tcp-{{ $virtualPortDB1 }}
+        number: {{ $virtualPortDB1 }}
+        protocol: TCP
+
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: egress-db-gw-{{ $serverHostDB2 }}
+spec:
+  selector:
+    app: {{ $egressLabel }}
+    istio: {{ $egressLabel }}
+  servers:
+    - hosts:
+        - {{ $serverHostDB2 }}
+      port:
+        name: tcp-{{ $virtualPortDB2 }}
+        {{ $virtualPortDB1 }}
+        protocol: TCP
+
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: egress-db-vs-{{ $serverHostDB1 }}
+spec:
+  exportTo:
+    - .
+  gateways:
+    - egress-db-gw-{{ $serverHostDB1 }}
+    - mesh
+  hosts:
+    - {{ $serverHostDB1 }}
+  tcp:
+    - match:
+        - gateways:
+            - mesh
+          port: {{ $serverPort }}
+      route:
+        - destination:
+            host: egress-postgres-svc
+            port:
+              number: {{ $virtualPortDB1 }}
+    - match:
+        - gateways:
+            - egress-db-gw-{{ $serverHostDB1 }}
+          port: {{ $virtualPortDB1 }}
+      route:
+        - destination:
+            host: {{ $serverHostDB1 }}
+            port:
+              number: {{ $serverPort }}
+
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: egress-db-vs-{{ $serverHostDB2 }}
+spec:
+  exportTo:
+    - .
+  gateways:
+    - egress-db-gw-{{ $serverHostDB2 }}
+    - mesh
+  hosts:
+    - {{ $serverHostDB2 }}
+  tcp:
+    - match:
+        - gateways:
+            - mesh
+          port: {{ $serverPort }}
+      route:
+        - destination:
+            host: egress-postgres-svc
+            port:
+              number: {{ $serverHostDB2 }}
+    - match:
+        - gateways:
+            - egress-db-gw-{{ $serverHostDB2 }}
+          port: {{ $serverHostDB2 }}
+      route:
+        - destination:
+            host: {{ $serverHostDB2 }}
+            port:
+              number: {{ $serverPort }}
+
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: egress-db-dr-{{ $serverHostDB1 }}
+spec:
+  exportTo:
+    - .
+  host: {{ $serverHostDB1 }}
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: { $serverPort }}
+        tls:
+          caCertificates: {{ $pathToCACert }}
+          clientCertificate: {{ $pathToCert }}
+          mode: MUTUAL
+          privateKey: {{ $pathToKey }}
+  workloadSelector:
+    matchLabels:
+	  app: {{ $egressLabel }}
+	  istio: {{ $egressLabel }}
+
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: egress-db-dr-{{ $serverHostDB2 }}
+spec:
+  exportTo:
+    - .
+  host: {{ $serverHostDB2 }}
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: {{ $serverPort }}
+		tls:
+		  caCertificates: {{ $pathToCACert }}
+		  clientCertificate: {{ $pathToCert }}
+		  mode: MUTUAL
+		  privateKey: {{ $pathToKey }}
+  workloadSelector:
+    matchLabels:
+	  app: { $egressLabel }}
+	  istio: {{ $egressLabel }}
