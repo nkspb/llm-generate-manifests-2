@@ -1,6 +1,6 @@
 from fastapi import APIRouter
-from models import ChatRequest, ChatResponse
-from core.llm_utils import llm_classify_intent, llm_rephrase_history, llm_assess_specificity
+from models import ChatRequest, ChatResponse, Intent
+from core.llm_utils import llm_classify_intent, llm_rephrase_history, llm_assess_specificity, llm_detect_meta_intent, llm_detect_meta_in_scenario_mode
 from core.placeholder_engine import handle_placeholder_reply, extract_placeholders, fill_placeholders
 # from core.manifest_flow import start_manifest_flow_from_query
 from core.manifest_engine import start_manifest_flow_from_query
@@ -10,9 +10,9 @@ from core.session_manager import SessionStore, SessionState
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-session_store: SessionStore = None # Should ideally be imported or injected
-vector_store = None # Must be injected from app.py
-llm = None # Same here
+session_store: SessionStore = None # Should be imported or injected
+vector_store = None # injected from app.py
+llm = None
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -20,17 +20,50 @@ async def chat(request: ChatRequest):
         # Retrieve session from SessionStore
         session = session_store.get(request.session_id)
         if not session:
-            return ChatResponse(
-                intent="CHAT",
-                action="NONE",
-                suggested_payload=None,
-                reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
+            # return ChatResponse(
+            #     intent=Intent.CHAT,
+            #     action="NONE",
+            #     suggested_payload=None,
+            #     reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
+            # )
+            logger.warning(f"Session {request.session_id} not found. Starting new session.")
+            request.message = (
+                f"Предыдущая сессия завершена. Начнем заново\n" + request.message
             )
+            return await chat(ChatRequest(message=request.message, session_id=None))
 
         if session.mode == "ASK_SCENARIO":
+            # Detect meta intent early to handle unexpected user input
+            meta_intent = llm_detect_meta_in_scenario_mode(llm, request.message)
+
+            if meta_intent == "HELP":
+                return ChatResponse(
+                    intent=Intent.HELP,
+                    action="NONE",
+                    suggested_payload=None,
+                    reply=(
+                        "Вы сейчас на этапе уточнения запроса.\n"
+                        "- Опишите, какую интеграцию вы хотите настроить.\n"
+                        " - Или напишите 'отмена', чтобы завершить процесс."
+                    ),
+                    session_id=request.session_id
+                )
+            
+            if meta_intent == "CANCEL":
+                session_store.end(request.session_id)
+                return ChatResponse(
+                    intent=Intent.CANCEL,
+                    action="NONE",
+                    suggested_payload=None,
+                    reply="Хорошо, отменяю процесс. Вы можете начать заново.",
+                    session_id=None
+                )
+                
+            # Proceed only if input is not a meta intent
             # Append message and update session
             session.collected_messages.append(request.message)
             logger.info(f"collected_messages: {session.collected_messages}")
+
             rephrased = llm_rephrase_history(llm, session.collected_messages)
             assess = llm_assess_specificity(llm, rephrased)
 
@@ -38,7 +71,7 @@ async def chat(request: ChatRequest):
                 bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
                 session_store.save(request.session_id, session)
                 return ChatResponse(
-                    intent="GET_MANIFESTS",
+                    intent=Intent.GET_MANIFESTS,
                     action="ASK_SCENARIO",
                     suggested_payload=None,
                     reply=("Спасибо. Нужны еще детали: " + bullet_questions),
@@ -55,7 +88,7 @@ async def chat(request: ChatRequest):
             if done:
                 session_store.end(request.session_id)
             return ChatResponse(
-                intent="GET_MANIFESTS",
+                intent=Intent.GET_MANIFESTS,
                 action="NONE",
                 suggested_payload=None,
                 reply=text,
@@ -63,7 +96,7 @@ async def chat(request: ChatRequest):
             )
 
         return ChatResponse(
-            intent="CHAT",
+            intent=Intent.CHAT,
             action="NONE",
             suggested_payload=None,
             reply="Сессия в неизвестном состоянии. Начните сначала."
@@ -90,7 +123,7 @@ async def chat(request: ChatRequest):
             ), reuse_session_id=session_id)
         
             return ChatResponse(
-                intent="GET_MANIFESTS",
+                intent=Intent.GET_MANIFESTS,
                 action="ASK_SCENARIO",
                 suggested_payload=None,
                 reply=(
@@ -107,7 +140,7 @@ async def chat(request: ChatRequest):
 
     if label == "HELP":
         return ChatResponse(
-            intent=label,
+            intent=Intent.HELP,
             action="NONE",
             suggested_payload=None,
             reply=(
@@ -121,7 +154,7 @@ async def chat(request: ChatRequest):
     except Exception:
         text = "Привет! Опишите, какой сценарий вас интересует."
     return ChatResponse(
-        intent="CHAT",
+        intent=Intent.CHAT,
         action="NONE",
         suggested_payload=None,
         reply=text,
