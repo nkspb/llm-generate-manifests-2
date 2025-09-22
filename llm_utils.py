@@ -2,6 +2,7 @@ import json
 import logging
 from pydantic import BaseModel
 from typing import Literal
+from models import Intent
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class SpecificityModel(BaseModel):
     rephrased_query: str = ""
     followups: list[str] = []
 
-def llm_classify_intent(llm, text: str) -> str:
+def llm_classify_intent(llm, text: str) -> Intent:
     """Determine the purpose of the user's request"""
     prompt = f""" Ты - классификатор запросов пользователя. Выбери намерение пользователя на основании его запроса:
     - GET_MANIFESTS: запросил манифесты, yaml, интеграцию, сценарий и т.п.
@@ -36,8 +37,9 @@ def llm_classify_intent(llm, text: str) -> str:
         response = llm.invoke(prompt)
         label = (getattr(response, "content", "") or "").strip().upper()
         logger.info(f"llm_classify_intent label: {label}")
-        if label in ["GET_MANIFESTS", "HELP", "CHAT"]:
-            return label
+        return Intent(label) if label in Intent._value2member_map_ else Intent.CHAT
+        # if label in ["GET_MANIFESTS", "HELP", "CHAT"]:
+        #     return label
     except Exception as e:
         logger.error(f"Произошла ошибка при классификации запроса пользователя: {e}")
         return "CHAT"
@@ -142,3 +144,39 @@ def llm_detect_meta_intent(llm, user_text: str) -> str:
         logger.warning(f"[MetaIntent] Parsing failed: {e}")
         return "OTHER"
 
+def llm_detect_meta_in_scenario_mode(llm, user_text: str) -> str:
+    """
+    Detects meta-intent in ASK_SCENARIO mode.
+    Returns one of: "HELP", "CANCEL", "OTHER"
+    """
+
+    prompt = f"""
+    Ты - помощник, который классифицирует сообщения пользователя на этапе сбора сценария.
+
+    Возможные категории:
+    - HELP: пользователь спрашивает, кто ты, что ты умеешь, просит помощи, хочет узнать о возможностях.
+    - CANCEL: пользователь хочет выйти, прервать, отменить процесс.
+    - OTHER: любое другое сообщение, связанное с описанием сценария или задачи.
+
+    Проанализируй следующее сообщение: 
+
+    \"{user_text}\"
+
+    Ответь только одной категорией: HELP, CANCEL или OTHER.
+    """
+
+    try:
+        response = llm.invoke(prompt)
+        text = (getattr(response, "content", "") or "").strip().upper()
+
+        # Normalize result just in case
+        if "HELP" in text:
+            return "HELP"
+        elif "CANCEL" in text:
+            return "CANCEL"
+        else:
+            return "OTHER"
+
+    except Exception as e:
+        logger.warning(f"[llm_detect_meta_in_scenario_mode] Ошибка при вызове LLM: {e}")
+        return "OTHER"
