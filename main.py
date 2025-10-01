@@ -66,12 +66,12 @@ async def text(message: UpdateMessage) -> None:
     user_id = message.peer.id
     user_text = message.message.text_message.text
     #######################
-    session_id = peer_sessions.get(user_id)
-    if session_id and not session_store.get(session_id):
-        session_id = None
+    actual_session_id = peer_sessions.get(user_id)
+    if actual_session_id and not session_store.get(actual_session_id):
+        actual_session_id = None
     #######################
 
-    chat_request = ChatRequest(message=user_text, session_id=session_id)
+    chat_request = ChatRequest(message=user_text, session_id=actual_session_id)
     chat_response = await chat_handler(chat_request)
     #######################
     if chat_response.session_id:
@@ -81,7 +81,7 @@ async def text(message: UpdateMessage) -> None:
         peer_sessions.pop(user_id, None)
     #######################
 
-    print(f"[MAIN] User: {user_id}, Sending session_id: {session_id}")
+    print(f"[MAIN] User: {user_id}, Sending session_id: {actual_session_id}")
     bot.messaging.send_message(
         message.peer,
         chat_response.reply
