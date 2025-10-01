@@ -15,8 +15,9 @@ from models import ChatRequest
 from routes.chat import chat as chat_handler
 import routes.chat as chat
 
-os.environ["REQUESTS_CA_BUNDLE"] = "X"
-os.environ["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = "X"
+# В значения нужно передать путь до сертификата минцифр
+os.environ["REQUESTS_CA_BUNDLE"] = "certs/X.pem"
+os.environ["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = "certs/X.pem"
 
 bot_config = {
     "endpoint": "X",
@@ -66,7 +67,7 @@ async def text(message: UpdateMessage) -> None:
     user_text = message.message.text_message.text
     #######################
     session_id = peer_sessions.get(user_id)
-    if session_id and not session_store.get(user_id):
+    if session_id and not session_store.get(session_id):
         session_id = None
     #######################
 
@@ -85,7 +86,6 @@ async def text(message: UpdateMessage) -> None:
         message.peer,
         chat_response.reply
     )
-
 
 bot.messaging.command_handler([CommandHandler(start, "start", description="Расскажу о себе")])   
 bot.messaging.message_handler([MessageHandler(sync_text_wrapper, MessageContentType.TEXT_MESSAGE)])
