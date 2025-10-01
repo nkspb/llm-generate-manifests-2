@@ -51,3 +51,11 @@ class SessionStore:
 
     def end(self, session_id: str) -> None:
         self._mem.pop(session_id, None)
+
+    def list_ids(self) -> List[str]:
+        """Return a list of all active session IDs (for debugging purposes)."""
+        return list(self._mem.keys())
+
+    def clear(self) -> None:
+        """Clear a list of all active session IDs (for debugging purposes)."""
+        self._mem.clear()
