@@ -65,23 +65,27 @@ async def text(message: UpdateMessage) -> None:
     # bot.messaging.send_message(message.peer, f'Ваше сообщение было: {message.message.text_message.text}')
     user_id = message.peer.id
     user_text = message.message.text_message.text
-    #######################
-    actual_session_id = peer_sessions.get(user_id)
-    if actual_session_id and not session_store.get(actual_session_id):
-        actual_session_id = None
-    #######################
+   
+    prior_session_id = peer_sessions.get(user_id)
+    if prior_session_id and session_store.get(prior_session_id):
+        session_id = prior_session_id
+    else:
+        session_id = None
 
-    chat_request = ChatRequest(message=user_text, session_id=actual_session_id)
+    print(f"[MAIN] Incoming message from {user_id}: {user_text}")
+    print(f"[MAIN] peer_sessions BEFORE: {peer_sessions}")
+    print(f"[MAIN] peer_sessions BEFORE: {peer_sessions}")
+
+    chat_request = ChatRequest(message=user_text, session_id=session_id)
     chat_response = await chat_handler(chat_request)
-    #######################
+
     if chat_response.session_id:
         peer_sessions[user_id] = chat_response.session_id
         print(f"[MAIN] Updated session for {user_id}: {chat_response.session_id}")
     else:
         peer_sessions.pop(user_id, None)
-    #######################
+        print(f"[MAIN] Cleared session for {user_id}")
 
-    print(f"[MAIN] User: {user_id}, Sending session_id: {actual_session_id}")
     bot.messaging.send_message(
         message.peer,
         chat_response.reply
