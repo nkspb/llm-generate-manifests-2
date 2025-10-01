@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from models import ChatRequest, ChatResponse, Intent
-from core.llm_utils import llm_classify_intent, llm_rephrase_history, llm_assess_specificity, llm_detect_meta_intent, llm_detect_meta_in_scenario_mode
+from core.llm_utils import llm_classify_intent, llm_rephrase_history, llm_assess_specificity, llm_detect_meta_intent, llm_detect_meta_in_scenario_mode, llm_detect_gibberish
 from core.placeholder_engine import handle_placeholder_reply, extract_placeholders, fill_placeholders
 # from core.manifest_flow import start_manifest_flow_from_query
 from core.manifest_engine import start_manifest_flow_from_query
@@ -19,13 +19,11 @@ async def chat(request: ChatRequest):
     if request.session_id:
         # Retrieve session from SessionStore
         session = session_store.get(request.session_id)
+
+        logger.info(f"Incoming session_id: {request.session_id}")
+        logger.info(f"Active sessions: {session_store.list_ids()}")
+
         if not session:
-            # return ChatResponse(
-            #     intent=Intent.CHAT,
-            #     action="NONE",
-            #     suggested_payload=None,
-            #     reply=("Сессия не найдена или завершена. Попробуйте начать сначала.")
-            # )
             logger.warning(f"Session {request.session_id} not found. Starting new session.")
             request.message = (
                 f"Предыдущая сессия завершена. Начнем заново\n" + request.message
@@ -61,11 +59,29 @@ async def chat(request: ChatRequest):
                 
             # Proceed only if input is not a meta intent
             # Append message and update session
+            if llm_detect_gibberish(llm, request.message):
+                return ChatResponse(
+                    intent=Intent.GET_MANIFESTS,
+                    action="ASK_SCENARIO",
+                    suggested_payload=None,
+                    reply="Похоже, вы ввели случайный или непонятный текст. Попробуйте снова.",
+                    session_id=request.session_id
+                )
+
             session.collected_messages.append(request.message)
             logger.info(f"collected_messages: {session.collected_messages}")
 
-            rephrased = llm_rephrase_history(llm, session.collected_messages)
-            assess = llm_assess_specificity(llm, rephrased)
+            try:
+                rephrased = llm_rephrase_history(llm, session.collected_messages)
+                assess = llm_assess_specificity(llm, rephrased)
+            except Exception as e:
+                logger.exception(f"Error while rephrasing or assessing specificity: {e}")
+                return ChatResponse(
+                    intent=Intent.CHAT,
+                    action="NONE",
+                    suggested_payload=None,
+                    reply="Ошибка при обработке запроса. Попробуйте снова.",
+                )
 
             if not assess["is_specific"]:
                 bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
@@ -101,21 +117,39 @@ async def chat(request: ChatRequest):
             suggested_payload=None,
             reply="Сессия в неизвестном состоянии. Начните сначала."
         )
-
-    label = llm_classify_intent(llm,request.message)
+    try:
+        label = llm_classify_intent(llm,request.message)
+    except Exception as e:
+        logger.exception(f"Error while classifying intent: {e}")
+        return ChatResponse(
+            intent=Intent.CHAT,
+            action="NONE",
+            suggested_payload=None,
+            reply="Не удалось распознать ваш запрос. Попробуйте снова.",
+        )
 
     if label == "GET_MANIFESTS":
-        rephrased = llm_rephrase_history(llm, [request.message])
+        try:
+            rephrased = llm_rephrase_history(llm, [request.message])
+            assess = llm_assess_specificity(llm, rephrased)
+
+        except Exception as e:
+            logger.exception(f"Error while rephrasing or assessing specificity: {e}")
+            return ChatResponse(
+                intent=Intent.CHAT,
+                action="NONE",
+                suggested_payload=None,
+                reply="Ошибка при обработке запроса. Попробуйте снова.",
+            )
         logger.info("Hitting GET_MANIFESTS")
         logger.info("request.message = %s", request.message)
         logger.info("rephrased = %s", rephrased)
-        assess = llm_assess_specificity(llm, rephrased)
-        print(f"assess rephrased = {assess['is_specific']}")
+        logger.info(f"assess is_specific = {assess['is_specific']}")
 
         if not assess["is_specific"]:
             bullet_questions = "\n".join(f"- " + q for q in assess["followups"])
             session_id = str(uuid.uuid4())
-            print(f"GET_MANIFESTS: session_id = {session_id}")
+            logger.info(f"GET_MANIFESTS: session_id = {session_id}")
             # Create new ASK_SCENARIO session in store
             session_store.create(SessionState(
                 mode="ASK_SCENARIO",
@@ -134,7 +168,6 @@ async def chat(request: ChatRequest):
             )
 
         query = rephrased.strip()
-
         logger.info("GET_MANIFESTS: query = %s", query)
         return start_manifest_flow_from_query(query, vector_store, llm, session_store)
 
@@ -151,8 +184,10 @@ async def chat(request: ChatRequest):
     try:
         response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
         text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
-    except Exception:
+    except Exception as e:
+        logger.exception(f"Error while invoking LLM: {e}")
         text = "Привет! Опишите, какой сценарий вас интересует."
+
     return ChatResponse(
         intent=Intent.CHAT,
         action="NONE",
