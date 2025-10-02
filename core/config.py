@@ -43,16 +43,17 @@ def load_vector_store():
     Load the database
     Run on app startup
     """
+
+    # Check if database exists and create it if not
+    if not os.path.exists(VECTOR_DIR):
+        logger.info("База данных не найдена. Создаем новую...")
+        os.makedirs(VECTOR_DIR)
+        build_vector_store()
+
     return Chroma(
         persist_directory=VECTOR_DIR,
         embedding_function=embeddings # embedding model for similarity search
     )
-
-# Check if database exists and create it if not
-if not os.path.exists(VECTOR_DIR):
-    logger.info("База данных не найдена. Создаем новую...")
-    os.makedirs(VECTOR_DIR)
-    build_vector_store()
 
 # Load the database with manifest templates
 vector_store = load_vector_store()
