@@ -23,7 +23,10 @@ bot_config = {
     "endpoint": "X",
     # сюда нужно подставить токен бота, который вы получили
     "token": "X",
-    "is_secure": True
+    "is_secure": True,
+    "logger_config": {
+        "level": "error"
+    }
 }
 
 logger = logging.getLogger(__name__)
@@ -74,10 +77,12 @@ async def text(message: UpdateMessage) -> None:
 
     print(f"[MAIN] Incoming message from {user_id}: {user_text}")
     print(f"[MAIN] peer_sessions BEFORE: {peer_sessions}")
-    print(f"[MAIN] peer_sessions BEFORE: {peer_sessions}")
+    print(f"[MAIN] Prior session_id used in ChatRequest: {session_id}")
 
     chat_request = ChatRequest(message=user_text, session_id=session_id)
     chat_response = await chat_handler(chat_request)
+
+    print(f"[MAIN] chat_response.session_id = {chat_response.session_id}")
 
     if chat_response.session_id:
         peer_sessions[user_id] = chat_response.session_id
@@ -97,4 +102,4 @@ bot.messaging.message_handler([MessageHandler(sync_text_wrapper, MessageContentT
 bot.updates.on_updates(do_read_messages=True, do_register_commands=True,in_thread=True)
 
 if __name__ == '__main__':
-    uvicorn.run("main:app", host="0.0.0.0", port=5001, log_level="info") # filename:fastapi app instance
+    uvicorn.run("main:app", host="0.0.0.0", port=5001, log_level="critical") # filename:fastapi app instance
