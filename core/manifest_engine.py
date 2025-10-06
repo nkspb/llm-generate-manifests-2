@@ -4,10 +4,12 @@ from models import ChatResponse
 from typing import Optional
 from core.placeholder_engine import extract_placeholders, format_placeholder_list
 from core.session_manager import SessionStore, SessionState
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type, wait_random_exponential
+from core.safe_llm import safe_llm_invoke
 
 logger = logging.getLogger(__name__)
 
-SIMILARITY_THRESHOLD = 0.4
+SIMILARITY_THRESHOLD = 0.6
 
 def start_manifest_flow_from_query(query: str, vector_store, llm, session_store: SessionStore, reuse_session_id: Optional[str] = None) -> ChatResponse:
     """
@@ -35,7 +37,7 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, session_store:
         )
 
     matched_doc, raw_score = results[0]
-    logger.debug("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
+    print("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
 
     doc_source = matched_doc.metadata.get("source", "source unknown")
 
@@ -89,7 +91,8 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, session_store:
     )
 
     try:
-        llm_response = llm.invoke(prompt)
+        # llm_response = llm.invoke(prompt)
+        llm_response = safe_llm_invoke(llm, prompt)
         ai_message = (getattr(llm_response, "content", "") or "").strip() or f"Введите значение для плейсхолдера {{{{first_placeholder}}}}:"
     except Exception as e:
         logger.warning(f"[MANIFEST_FLOW] Ошибка при обращении к LLM: {e}")
