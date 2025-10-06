@@ -70,9 +70,13 @@ async def text(message: UpdateMessage) -> None:
     user_text = message.message.text_message.text
    
     prior_session_id = peer_sessions.get(user_id)
+    print(f"[MAIN] user_id = {user_id}, peer_sessions = {peer_sessions}")
+
     if prior_session_id and session_store.get(prior_session_id):
+        print(f"[DEBUG] Using session: {prior_session_id}")
         session_id = prior_session_id
     else:
+        print(f"[DEBUG] No valid session for user {user_id}")
         session_id = None
 
     print(f"[MAIN] Incoming message from {user_id}: {user_text}")
