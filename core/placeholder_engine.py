@@ -93,7 +93,7 @@ def handle_placeholder_reply(llm, session_id: str, sessions: dict, user_input: s
             )
 
         if intent == "CANCEL":
-            sessions.pop(session_id, None)
+            sessions.end(session_id)
             return ("Отменяю процесс. Вы можете начать заново", True)
         return (f"Не удалось распознать команду. Попробуйте снова", False)
 
