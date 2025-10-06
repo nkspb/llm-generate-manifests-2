@@ -37,8 +37,15 @@ def start_manifest_flow_from_query(query: str, vector_store, llm, session_store:
     matched_doc, raw_score = results[0]
     logger.debug("Found document: %s, raw_score = %s", matched_doc.metadata, raw_score)
 
-    doc_text = matched_doc.page_content
     doc_source = matched_doc.metadata.get("source", "source unknown")
+
+    try:
+        with open(doc_source, encoding="utf-8") as f:
+            doc_text = f.read()
+        print(f"[MANIFEST_SEARCH] Selected manifest file: {doc_source}")
+    except Exception as e:
+        logger.warning(f"Failed to load raw YAML from {doc_source}, falling back to embedded text: {e}")
+        doc_text = matched_doc.page_content
 
     similarity = 1 - raw_score
     if similarity < SIMILARITY_THRESHOLD:
