@@ -16,12 +16,15 @@ llm = None
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    print(f"[CHAT] Received ChatRequest: {request}")
+    print(f"[CHAT] Request.session_id: {request.session_id}")
     if request.session_id:
         # Retrieve session from SessionStore
         session = session_store.get(request.session_id)
+        print(f"[CHAT] Looked up session_store.get({request.session_id}) -> {session}")
 
-        logger.info(f"Incoming session_id: {request.session_id}")
-        logger.info(f"Active sessions: {session_store.list_ids()}")
+        print(f"Incoming session_id: {request.session_id}")
+        print(f"Active sessions: {session_store.list_ids()}")
 
         if not session:
             logger.warning(f"Session {request.session_id} not found. Starting new session.")
@@ -31,6 +34,7 @@ async def chat(request: ChatRequest):
             return await chat(ChatRequest(message=request.message, session_id=None))
 
         if session.mode == "ASK_SCENARIO":
+            print("f[CHAT] Mode: ASK_SCENARIO, messages so far: {session.collected_messages}")
             # Detect meta intent early to handle unexpected user input
             meta_intent = llm_detect_meta_in_scenario_mode(llm, request.message)
 
@@ -69,10 +73,12 @@ async def chat(request: ChatRequest):
                 )
 
             session.collected_messages.append(request.message)
-            logger.info(f"collected_messages: {session.collected_messages}")
 
             try:
                 rephrased = llm_rephrase_history(llm, session.collected_messages)
+                print(f"[CHAT] collected_messages: {session.collected_messages}")
+                print(f"[CHAT] rephrased: {rephrased}")
+
                 assess = llm_assess_specificity(llm, rephrased)
             except Exception as e:
                 logger.exception(f"Error while rephrasing or assessing specificity: {e}")
@@ -99,6 +105,7 @@ async def chat(request: ChatRequest):
             return start_manifest_flow_from_query(query, vector_store, llm, session_store, reuse_session_id=request.session_id)
 
         if session.mode == "MANIFEST":
+            print(f"[CHAT] Mode: MANIFEST, remaining placeholders: {session.remaining_placeholders}")
             # Pass session_store to placeholder handler
             text, done = handle_placeholder_reply(llm, request.session_id, session_store, request.message)
             if done:
@@ -155,7 +162,8 @@ async def chat(request: ChatRequest):
                 mode="ASK_SCENARIO",
                 collected_messages=[request.message]
             ), reuse_session_id=session_id)
-        
+            print(f"[CHAT] ASK_SCENARIO session created: {session_id}")
+            print(f"[CHAT] Stored session: {session_store.get(session_id)}")
             return ChatResponse(
                 intent=Intent.GET_MANIFESTS,
                 action="ASK_SCENARIO",
