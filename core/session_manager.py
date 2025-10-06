@@ -33,10 +33,12 @@ class SessionStore:
     def create(self, state: SessionState, reuse_session_id: Optional[str] = None) -> str:
         # If session is reused, essentially update its state
         if reuse_session_id:
+            print(f"[STORE] Reusing session_id: {reuse_session_id}")
             self._mem[reuse_session_id] = state
             return reuse_session_id
         # If session is not reused, return a new session
         sid = str(uuid.uuid4())
+        print(f"[STORE] Creating new session_id: {sid}")
         self._mem[sid] = state
         return sid
         
@@ -50,6 +52,7 @@ class SessionStore:
         self._mem[session_id] = state
 
     def end(self, session_id: str) -> None:
+        print(f"[STORE] Ending session: {session_id}")
         self._mem.pop(session_id, None)
 
     def list_ids(self) -> List[str]:
