@@ -7,6 +7,8 @@ from core.manifest_engine import start_manifest_flow_from_query
 import uuid, logging
 from core.placeholder_engine import format_placeholder_list
 from core.session_manager import SessionStore, SessionState
+from core.safe_llm import safe_llm_invoke
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ async def chat(request: ChatRequest):
             return await chat(ChatRequest(message=request.message, session_id=None))
 
         if session.mode == "ASK_SCENARIO":
-            print("f[CHAT] Mode: ASK_SCENARIO, messages so far: {session.collected_messages}")
+            print(f"[CHAT] Mode: ASK_SCENARIO, messages so far: {session.collected_messages}")
             # Detect meta intent early to handle unexpected user input
             meta_intent = llm_detect_meta_in_scenario_mode(llm, request.message)
 
@@ -190,8 +192,9 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
-        text = (getattr(response, "content", "") or "").strip() or "Привет! Опишите, какой сценарий вас интересует."
+        # response = llm.invoke(f"Ответь коротко и дружелюбно: {request.message}")
+        response = safe_llm_invoke(llm, f"Ответь коротко и дружелюбно: {request.message}")
+        text = (getattr(response, "content", "") or "").strip() or "Привет! Не удалось получить ответ от модели. Опишите, какой сценарий вас интересует."
     except Exception as e:
         logger.exception(f"Error while invoking LLM: {e}")
         text = "Привет! Опишите, какой сценарий вас интересует."
