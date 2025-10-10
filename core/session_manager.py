@@ -62,3 +62,6 @@ class SessionStore:
     def clear(self) -> None:
         """Clear a list of all active session IDs (for debugging purposes)."""
         self._mem.clear()
+
+    def get_latest_for_user(self, user_id: int) -> Optional[str]:
+        return self._user_to_session.get(user_id)
