@@ -69,7 +69,10 @@ async def text(message: UpdateMessage) -> None:
     user_id = message.peer.id
     user_text = message.message.text_message.text
    
-    prior_session_id = peer_sessions.get(user_id)
+    # session_id = None
+    # prior_session_id = peer_sessions.get(user_id)
+    prior_session_id = session_store.get_latest_for_user(user_id)
+    
     print(f"[MAIN] user_id = {user_id}, peer_sessions = {peer_sessions}")
 
     if prior_session_id and session_store.get(prior_session_id):
@@ -106,4 +109,4 @@ bot.messaging.message_handler([MessageHandler(sync_text_wrapper, MessageContentT
 bot.updates.on_updates(do_read_messages=True, do_register_commands=True,in_thread=True)
 
 if __name__ == '__main__':
-    uvicorn.run("main:app", host="0.0.0.0", port=5001, log_level="critical") # filename:fastapi app instance
+    uvicorn.run("main:app", host="0.0.0.0", port=5001, log_level="info") # filename:fastapi app instance
